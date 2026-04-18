@@ -41,7 +41,7 @@ int wmain(int argc, wchar_t **argv) {
     if (error_code == MFTSCAN_OK) {
         error_code = (options.format == MFTSCAN_FORMAT_JSON)
             ? mftscan_output_json(&options, &scan_result)
-            : mftscan_output_table(&scan_result);
+            : mftscan_output_table(&options, &scan_result);
     }
 
     if (error_code != MFTSCAN_OK) {

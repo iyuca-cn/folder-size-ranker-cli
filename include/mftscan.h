@@ -62,7 +62,7 @@ void mftscan_context_free(MftscanContext *context);
 MftscanError mftscan_scan_volume(MftscanContext *context, const MftscanOptions *options);
 MftscanError mftscan_build_results(const MftscanContext *context, const MftscanOptions *options, MftscanScanResult *scan_result);
 void mftscan_free_results(MftscanScanResult *scan_result);
-MftscanError mftscan_output_table(const MftscanScanResult *scan_result);
+MftscanError mftscan_output_table(const MftscanOptions *options, const MftscanScanResult *scan_result);
 MftscanError mftscan_output_json(const MftscanOptions *options, const MftscanScanResult *scan_result);
 char *mftscan_utf8_from_wide(const wchar_t *wide_text);
 wchar_t *mftscan_strdup_w(const wchar_t *source_text);

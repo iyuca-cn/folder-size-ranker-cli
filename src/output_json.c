@@ -64,8 +64,13 @@ MftscanError mftscan_output_json(const MftscanOptions *options, const MftscanSca
         }
 
         if (!yyjson_mut_obj_add_strcpy(document, item_object, "path", path_utf8) ||
-            !yyjson_mut_obj_add_uint(document, item_object, "logical_size", scan_result->items[index].logical_size) ||
-            !yyjson_mut_obj_add_uint(document, item_object, "allocated_size", scan_result->items[index].allocated_size)) {
+            !yyjson_mut_obj_add_uint(
+                document,
+                item_object,
+                "bytes",
+                (options->sort_mode == MFTSCAN_SORT_ALLOCATED)
+                    ? scan_result->items[index].allocated_size
+                    : scan_result->items[index].logical_size)) {
             free(path_utf8);
             error_code = MFTSCAN_ERROR_JSON;
             goto cleanup;
