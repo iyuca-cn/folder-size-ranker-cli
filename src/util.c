@@ -482,7 +482,7 @@ void mftscan_print_help(FILE *stream) {
     fprintf(
         stream,
         "用法:\n"
-        "  mftscan.exe --volume C: --sort <logical|allocated> [--min-size expr] [--format <table|json>] [--limit N]\n\n"
+        "  folder-size-ranker-cli.exe --volume C: --sort <logical|allocated> [--min-size expr] [--format <table|json>] [--limit N]\n\n"
         "说明:\n"
         "  - 直接读取指定 NTFS 卷的 MFT\n"
         "  - 只输出没有子文件夹的文件夹\n"

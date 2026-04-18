@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release x64
+        shell: pwsh
+        run: msbuild .\folder-size-ranker-cli.vcxproj /t:Build /p:Configuration=Release /p:Platform=x64 /m
+
+      - name: Read annotated tag notes
+        shell: pwsh
+        run: |
+          $notes = git for-each-ref "refs/tags/$env:GITHUB_REF_NAME" --format="%(contents)"
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            $notes = $env:GITHUB_REF_NAME
+          }
+          Set-Content -Path .\release-notes.md -Value $notes -Encoding utf8
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          files: x64/Release/folder-size-ranker-cli.exe

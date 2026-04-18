@@ -1,6 +1,6 @@
-# mftscan
+# folder-size-ranker-cli
 
-`mftscan` 是一个 Windows 命令行工具，用 C 语言实现，通过直接读取指定 NTFS 卷的 MFT 来统计文件夹大小。
+`folder-size-ranker-cli` 是一个 Windows 命令行工具，用 C 语言实现，通过直接读取指定 NTFS 卷的 MFT 来统计文件夹大小。
 
 它的目标是做类似 WizTree 的快速统计，但当前第一版只输出“没有子文件夹的文件夹”，也就是叶子目录，并按大小从大到小排序。
 
@@ -40,24 +40,24 @@
 
 ## 构建
 
-使用 Visual Studio 2022 或 MSBuild 构建：
+建议在 **Visual Studio Developer PowerShell** 或 **Developer Command Prompt** 中构建：
 
 ```powershell
-& "D:\vs\2022\Community\MSBuild\Current\Bin\MSBuild.exe" .\mftscan.vcxproj /t:Build /p:Configuration=Release /p:Platform=x64
+msbuild .\folder-size-ranker-cli.vcxproj /t:Build /p:Configuration=Release /p:Platform=x64
 ```
 
 构建产物：
 
 ```text
-x64\Release\mftscan.exe
+x64\Release\folder-size-ranker-cli.exe
 ```
 
-如果你的 Visual Studio 安装路径不同，请改成你本机的 `MSBuild.exe` 路径。
+如果当前终端没有 `msbuild`，请先打开 Visual Studio 自带的开发者终端再执行。
 
 ## CLI 用法
 
 ```text
-mftscan.exe --volume C: --sort <logical|allocated> [--min-size bytes] [--format <table|json>] [--limit N]
+folder-size-ranker-cli.exe --volume C: --sort <logical|allocated> [--min-size expr] [--format <table|json>] [--limit N]
 ```
 
 参数说明：
@@ -91,7 +91,7 @@ mftscan.exe --volume C: --sort <logical|allocated> [--min-size bytes] [--format 
 如果表达式里包含空格或括号，建议加引号，例如：
 
 ```powershell
-.\x64\Release\mftscan.exe --volume C: --sort logical --min-size "(1.5 + 0.5) * 1024 * 1024"
+.\x64\Release\folder-size-ranker-cli.exe --volume C: --sort logical --min-size "(1.5 + 0.5) * 1024 * 1024"
 ```
 
 ## 示例
@@ -99,25 +99,25 @@ mftscan.exe --volume C: --sort <logical|allocated> [--min-size bytes] [--format 
 输出 `C:` 盘最大的 20 个叶子目录，按分配大小排序：
 
 ```powershell
-.\x64\Release\mftscan.exe --volume C: --sort allocated --format table --limit 20
+.\x64\Release\folder-size-ranker-cli.exe --volume C: --sort allocated --format table --limit 20
 ```
 
 输出 `C:` 盘逻辑大小至少 1 GiB 的叶子目录：
 
 ```powershell
-.\x64\Release\mftscan.exe --volume C: --sort logical --min-size 1073741824 --format table
+.\x64\Release\folder-size-ranker-cli.exe --volume C: --sort logical --min-size 1073741824 --format table
 ```
 
 使用表达式指定最小值：
 
 ```powershell
-.\x64\Release\mftscan.exe --volume C: --sort allocated --min-size "(1.5+0.5)*1024*1024" --format table
+.\x64\Release\folder-size-ranker-cli.exe --volume C: --sort allocated --min-size "(1.5+0.5)*1024*1024" --format table
 ```
 
 输出 JSON，方便脚本处理：
 
 ```powershell
-.\x64\Release\mftscan.exe --volume C: --sort allocated --min-size 104857600 --format json --limit 50
+.\x64\Release\folder-size-ranker-cli.exe --volume C: --sort allocated --min-size 104857600 --format json --limit 50
 ```
 
 ## 表格输出
@@ -162,3 +162,21 @@ JSON 输出为 UTF-8，结构如下：
 - 当前只支持单个盘符扫描。
 - 当前只输出叶子目录，不输出父目录汇总。
 - 当前第一版优先保证正确性和结构清晰，后续可以继续优化性能和输出格式。
+
+## GitHub Actions
+
+仓库配置 GitHub Actions 后：
+
+- 普通 `push` / `pull_request` 会自动执行 Windows 编译检查
+- 推送 `v*` annotated tag 会自动创建 GitHub Release
+- Release 会上传由 Action 构建出的 `folder-size-ranker-cli.exe`
+- Release notes 使用 annotated tag 的完整多行描述
+
+推荐这样发版：
+
+```powershell
+git tag -a v1.0.0
+git push origin v1.0.0
+```
+
+然后在 Git 打开的编辑器里写多行版本说明。

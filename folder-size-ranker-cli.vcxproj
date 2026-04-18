@@ -14,7 +14,7 @@
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{6E7FD79E-4B84-4D8B-BB9E-4DDFD7D442C1}</ProjectGuid>
-    <RootNamespace>mftscan</RootNamespace>
+    <RootNamespace>folder_size_ranker_cli</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -43,8 +43,8 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
     <OutDir>$(SolutionDir)x64\$(Configuration)\</OutDir>
-    <IntDir>$(SolutionDir)x64\$(Configuration)\obj\</IntDir>
-    <TargetName>mftscan</TargetName>
+    <IntDir>$(SolutionDir)x64\$(Configuration)\obj\folder-size-ranker-cli\</IntDir>
+    <TargetName>folder-size-ranker-cli</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
