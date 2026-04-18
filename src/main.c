@@ -34,11 +34,6 @@ int wmain(int argc, wchar_t **argv) {
         return 0;
     }
 
-    if (!mftscan_is_process_elevated()) {
-        mftscan_print_error(MFTSCAN_ERROR_NOT_ADMIN);
-        return (int)MFTSCAN_ERROR_NOT_ADMIN;
-    }
-
     mftscan_context_init(&context);
 
     error_code = mftscan_scan_volume(&context, &options);

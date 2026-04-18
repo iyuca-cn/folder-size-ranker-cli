@@ -6,7 +6,7 @@
 
 #include "model.h"
 
-MftscanError mftscan_scan_volume(MftscanContext *context, const MftscanOptions *options) {
+MftscanError mftscan_scan_volume_ntfs(MftscanContext *context, const MftscanOptions *options) {
     MftscanVolumeHandle volume_handle;
     NTFS_FILE_RECORD_INPUT_BUFFER input_buffer = { 0 };
     NTFS_FILE_RECORD_OUTPUT_BUFFER *output_buffer = NULL;

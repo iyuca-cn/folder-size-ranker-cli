@@ -29,6 +29,25 @@ static void mftscan_build_device_path(const wchar_t *volume_text, wchar_t *devic
     device_path[6] = L'\0';
 }
 
+MftscanError mftscan_probe_volume_filesystem(const MftscanOptions *options, MftscanFilesystemKind *filesystem_kind) {
+    wchar_t root_path[4] = { 0 };
+    wchar_t filesystem_name[MAX_PATH] = { 0 };
+
+    if (options == NULL || filesystem_kind == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    mftscan_build_root_path(options->volume, root_path, ARRAYSIZE(root_path));
+    if (!GetVolumeInformationW(root_path, NULL, 0, NULL, NULL, NULL, filesystem_name, ARRAYSIZE(filesystem_name))) {
+        return MFTSCAN_ERROR_VOLUME_QUERY;
+    }
+
+    *filesystem_kind = (_wcsicmp(filesystem_name, L"NTFS") == 0)
+        ? MFTSCAN_FILESYSTEM_NTFS
+        : MFTSCAN_FILESYSTEM_OTHER;
+    return MFTSCAN_OK;
+}
+
 MftscanError mftscan_open_volume(const MftscanOptions *options, MftscanVolumeHandle *volume_handle) {
     wchar_t root_path[4] = { 0 };
     wchar_t device_path[7] = { 0 };

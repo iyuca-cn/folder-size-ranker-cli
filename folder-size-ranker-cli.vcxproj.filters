@@ -52,6 +52,12 @@
     <ClCompile Include="src\path_resolver.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\platform_scan.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\scan.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="src\util.c">
       <Filter>Source Files</Filter>
     </ClCompile>

@@ -157,7 +157,7 @@ const char *mftscan_error_message(MftscanError error_code) {
     case MFTSCAN_ERROR_OPEN_VOLUME:
         return "无法打开目标卷";
     case MFTSCAN_ERROR_VOLUME_QUERY:
-        return "无法获取 NTFS 卷信息";
+        return "无法获取卷信息";
     case MFTSCAN_ERROR_MFT_ENUM:
         return "MFT 记录枚举失败";
     case MFTSCAN_ERROR_MFT_PARSE:
@@ -484,9 +484,9 @@ void mftscan_print_help(FILE *stream) {
         "用法:\n"
         "  folder-size-ranker-cli.exe --volume C: --sort <logical|allocated> [--min-size expr] [--format <table|json>] [--limit N]\n\n"
         "说明:\n"
-        "  - 直接读取指定 NTFS 卷的 MFT\n"
+        "  - NTFS 卷直接读取 MFT，其他文件系统使用平台 API 降级扫描\n"
         "  - 只输出没有子文件夹的文件夹\n"
-        "  - 需要管理员权限运行\n");
+        "  - NTFS MFT 路径需要管理员权限，平台 API 降级路径不做管理员前置要求\n");
 }
 
 MftscanError mftscan_parse_options(int argc, wchar_t **argv, MftscanOptions *options, bool *show_help) {

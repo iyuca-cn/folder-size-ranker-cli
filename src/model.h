@@ -9,6 +9,11 @@
 #define MFTSCAN_FRN_MASK 0x0000FFFFFFFFFFFFULL
 #define MFTSCAN_ROOT_FRN 5ULL
 
+typedef enum MftscanFilesystemKind {
+    MFTSCAN_FILESYSTEM_NTFS = 0,
+    MFTSCAN_FILESYSTEM_OTHER = 1
+} MftscanFilesystemKind;
+
 typedef struct MftscanDirNode {
     uint64_t frn;
     uint64_t parent_frn;
@@ -73,6 +78,9 @@ void mftscan_map_free(MftscanUint64Map *map);
 void mftscan_free_record_info(MftscanRecordInfo *record_info);
 MftscanError mftscan_open_volume(const MftscanOptions *options, MftscanVolumeHandle *volume_handle);
 void mftscan_close_volume(MftscanVolumeHandle *volume_handle);
+MftscanError mftscan_probe_volume_filesystem(const MftscanOptions *options, MftscanFilesystemKind *filesystem_kind);
+MftscanError mftscan_scan_volume_ntfs(MftscanContext *context, const MftscanOptions *options);
+MftscanError mftscan_scan_volume_platform(MftscanContext *context, const MftscanOptions *options);
 MftscanError mftscan_parse_file_record(
     uint8_t *record_buffer,
     size_t record_length,

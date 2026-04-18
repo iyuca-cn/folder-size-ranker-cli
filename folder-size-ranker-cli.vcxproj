@@ -110,6 +110,8 @@
     <ClCompile Include="src\output_json.c" />
     <ClCompile Include="src\output_table.c" />
     <ClCompile Include="src\path_resolver.c" />
+    <ClCompile Include="src\platform_scan.c" />
+    <ClCompile Include="src\scan.c" />
     <ClCompile Include="src\util.c" />
     <ClCompile Include="third_party\yyjson\yyjson.c" />
   </ItemGroup>
