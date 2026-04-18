@@ -57,6 +57,7 @@ bool mftscan_is_process_elevated(void);
 MftscanError mftscan_parse_options(int argc, wchar_t **argv, MftscanOptions *options, bool *show_help);
 void mftscan_print_help(FILE *stream);
 const char *mftscan_error_message(MftscanError error_code);
+const char *mftscan_error_detail(void);
 void mftscan_context_init(MftscanContext *context);
 void mftscan_context_free(MftscanContext *context);
 MftscanError mftscan_scan_volume(MftscanContext *context, const MftscanOptions *options);

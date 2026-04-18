@@ -4,7 +4,12 @@
 #include "model.h"
 
 static void mftscan_print_error(MftscanError error_code) {
-    fprintf(stderr, "错误: %s\n", mftscan_error_message(error_code));
+    const char *detail_text = mftscan_error_detail();
+    if (detail_text != NULL && detail_text[0] != '\0') {
+        fprintf(stderr, "错误: %s: %s\n", mftscan_error_message(error_code), detail_text);
+    } else {
+        fprintf(stderr, "错误: %s\n", mftscan_error_message(error_code));
+    }
 }
 
 int wmain(int argc, wchar_t **argv) {
@@ -18,7 +23,9 @@ int wmain(int argc, wchar_t **argv) {
     error_code = mftscan_parse_options(argc, argv, &options, &show_help);
     if (error_code != MFTSCAN_OK) {
         mftscan_print_error(error_code);
-        mftscan_print_help(stderr);
+        if (mftscan_error_detail()[0] == '\0') {
+            mftscan_print_help(stderr);
+        }
         return (int)error_code;
     }
 

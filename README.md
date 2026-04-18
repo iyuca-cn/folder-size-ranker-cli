@@ -66,7 +66,7 @@ mftscan.exe --volume C: --sort <logical|allocated> [--min-size bytes] [--format 
 | --- | --- | --- | --- |
 | `--volume <X:>` | 是 | 无 | 指定要扫描的单个盘符，例如 `C:` |
 | `--sort <logical|allocated>` | 是 | 无 | 指定排序字段 |
-| `--min-size <bytes>` | 否 | `0` | 只输出大小大于等于该值的目录 |
+| `--min-size <expr>` | 否 | `0` | 只输出大小大于等于该值的目录，支持表达式 |
 | `--format <table|json>` | 否 | `table` | 输出表格或 JSON |
 | `--limit <N>` | 否 | 不限制 | 只输出前 N 条 |
 | `--help` | 否 | 无 | 显示帮助 |
@@ -75,6 +75,24 @@ mftscan.exe --volume C: --sort <logical|allocated> [--min-size bytes] [--format 
 
 - `--sort logical`：按逻辑大小过滤和排序。
 - `--sort allocated`：按分配大小过滤和排序。
+
+`--min-size` 支持：
+
+- `+ - * /`
+- 括号 `()`
+- 小数
+- 空格
+
+最终结果会**向上取整**为字节数，例如：
+
+- `10/3` => `4`
+- `1.5*1024*1024` => `1572864`
+
+如果表达式里包含空格或括号，建议加引号，例如：
+
+```powershell
+.\x64\Release\mftscan.exe --volume C: --sort logical --min-size "(1.5 + 0.5) * 1024 * 1024"
+```
 
 ## 示例
 
@@ -88,6 +106,12 @@ mftscan.exe --volume C: --sort <logical|allocated> [--min-size bytes] [--format 
 
 ```powershell
 .\x64\Release\mftscan.exe --volume C: --sort logical --min-size 1073741824 --format table
+```
+
+使用表达式指定最小值：
+
+```powershell
+.\x64\Release\mftscan.exe --volume C: --sort allocated --min-size "(1.5+0.5)*1024*1024" --format table
 ```
 
 输出 JSON，方便脚本处理：
