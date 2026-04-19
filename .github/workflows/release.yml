@@ -37,20 +37,61 @@ jobs:
           Copy-Item .\x64\Release\folder-size-ranker-cli.exe .\artifacts\folder-size-ranker-cli-x64.exe -Force
 
       - name: Read annotated tag notes
+        id: tag_notes
         shell: pwsh
         run: |
-          $notes = git for-each-ref "refs/tags/$env:GITHUB_REF_NAME" --format="%(contents)"
-          if ([string]::IsNullOrWhiteSpace($notes)) {
-            $notes = $env:GITHUB_REF_NAME
+          function Get-GitOutput([string[]]$Arguments) {
+            $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = 'git'
+            foreach ($argument in $Arguments) {
+              [void]$startInfo.ArgumentList.Add($argument)
+            }
+            $startInfo.UseShellExecute = $false
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+
+            $process = [System.Diagnostics.Process]::Start($startInfo)
+            $stdout = $process.StandardOutput.ReadToEnd()
+            $stderr = $process.StandardError.ReadToEnd()
+            $process.WaitForExit()
+
+            if ($process.ExitCode -ne 0) {
+              throw "git $($Arguments -join ' ') 失败: $stderr"
+            }
+
+            return $stdout
           }
-          Set-Content -Path .\release-notes.md -Value $notes -Encoding utf8
+
+          $tagRef = "refs/tags/$env:GITHUB_REF_NAME"
+          $tagType = Get-GitOutput @('cat-file', '-t', $tagRef)
+          $tagType = $tagType.Trim()
+          if ($tagType -ne 'tag') {
+            throw "发布必须使用 annotated tag。$env:GITHUB_REF_NAME 当前不是 annotated tag。"
+          }
+
+          $notes = Get-GitOutput @('for-each-ref', $tagRef, '--format=%(contents)')
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            throw "annotated tag 说明不能为空: $env:GITHUB_REF_NAME"
+          }
+
+          $delimiter = [guid]::NewGuid().ToString('N')
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "body<<$delimiter`n", $utf8NoBom)
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, $notes, $utf8NoBom)
+          if ($notes.EndsWith("`n")) {
+            [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "$delimiter`n", $utf8NoBom)
+          } else {
+            [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "`n$delimiter`n", $utf8NoBom)
+          }
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          body_path: release-notes.md
+          body: ${{ steps.tag_notes.outputs.body }}
           files: |
             artifacts/folder-size-ranker-cli-x86.exe
             artifacts/folder-size-ranker-cli-x64.exe

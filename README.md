@@ -236,7 +236,8 @@ JSON 输出为 UTF-8，结构如下：
 - Release 会上传由 Action 构建出的：
   - `folder-size-ranker-cli-x86.exe`
   - `folder-size-ranker-cli-x64.exe`
-- Release notes 使用 annotated tag 的完整多行描述
+- GitHub Release 正文严格使用 annotated tag 的完整多行描述
+- 如果使用 lightweight tag，Release 工作流会直接失败
 
 推荐这样发版：
 
