@@ -40,38 +40,43 @@ jobs:
         id: tag_notes
         shell: pwsh
         run: |
-          function Get-GitOutput([string[]]$Arguments) {
-            $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-            $startInfo.FileName = 'git'
-            foreach ($argument in $Arguments) {
-              [void]$startInfo.ArgumentList.Add($argument)
-            }
-            $startInfo.UseShellExecute = $false
-            $startInfo.RedirectStandardOutput = $true
-            $startInfo.RedirectStandardError = $true
-            $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-            $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
-
-            $process = [System.Diagnostics.Process]::Start($startInfo)
-            $stdout = $process.StandardOutput.ReadToEnd()
-            $stderr = $process.StandardError.ReadToEnd()
-            $process.WaitForExit()
-
-            if ($process.ExitCode -ne 0) {
-              throw "git $($Arguments -join ' ') 失败: $stderr"
-            }
-
-            return $stdout
-          }
-
           $tagRef = "refs/tags/$env:GITHUB_REF_NAME"
-          $tagType = Get-GitOutput @('cat-file', '-t', $tagRef)
-          $tagType = $tagType.Trim()
+          $tagType = git cat-file -t $tagRef
+          if ($LASTEXITCODE -ne 0) {
+            throw "无法读取 tag 对象: $env:GITHUB_REF_NAME"
+          }
+          $tagType = ($tagType | Out-String).Trim()
           if ($tagType -ne 'tag') {
             throw "发布必须使用 annotated tag。$env:GITHUB_REF_NAME 当前不是 annotated tag。"
           }
 
-          $notes = Get-GitOutput @('for-each-ref', $tagRef, '--format=%(contents)')
+          $notesPath = Join-Path $PWD 'tag-notes.txt'
+          $notesErrorPath = Join-Path $PWD 'tag-notes.stderr.txt'
+          Remove-Item $notesPath, $notesErrorPath -ErrorAction SilentlyContinue
+
+          $process = Start-Process `
+            -FilePath 'git' `
+            -ArgumentList @('for-each-ref', $tagRef, '--format=%(contents)') `
+            -NoNewWindow `
+            -Wait `
+            -PassThru `
+            -RedirectStandardOutput $notesPath `
+            -RedirectStandardError $notesErrorPath
+
+          if ($process.ExitCode -ne 0) {
+            $stderr = if (Test-Path $notesErrorPath) {
+              [System.IO.File]::ReadAllText($notesErrorPath, [System.Text.UTF8Encoding]::new($false))
+            } else {
+              ''
+            }
+            throw "无法读取 annotated tag 说明: $env:GITHUB_REF_NAME`n$stderr"
+          }
+
+          $notes = if (Test-Path $notesPath) {
+            [System.IO.File]::ReadAllText($notesPath, [System.Text.UTF8Encoding]::new($false))
+          } else {
+            ''
+          }
           if ([string]::IsNullOrWhiteSpace($notes)) {
             throw "annotated tag 说明不能为空: $env:GITHUB_REF_NAME"
           }
