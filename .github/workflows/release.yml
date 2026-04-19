@@ -40,8 +40,15 @@ jobs:
         id: tag_notes
         shell: pwsh
         run: |
-          $tagRef = "refs/tags/$env:GITHUB_REF_NAME"
-          $tagType = git cat-file -t $tagRef
+          $remoteTagRef = "refs/tags/$env:GITHUB_REF_NAME"
+          $localTagRef = 'refs/tags/__release_tag__'
+          git update-ref -d $localTagRef 2>$null
+          git fetch --force origin "+$remoteTagRef:$localTagRef"
+          if ($LASTEXITCODE -ne 0) {
+            throw "无法从 origin 获取 tag: $env:GITHUB_REF_NAME"
+          }
+
+          $tagType = git cat-file -t $localTagRef
           if ($LASTEXITCODE -ne 0) {
             throw "无法读取 tag 对象: $env:GITHUB_REF_NAME"
           }
@@ -56,7 +63,7 @@ jobs:
 
           $process = Start-Process `
             -FilePath 'git' `
-            -ArgumentList @('for-each-ref', $tagRef, '--format=%(contents)') `
+            -ArgumentList @('for-each-ref', $localTagRef, '--format=%(contents)') `
             -NoNewWindow `
             -Wait `
             -PassThru `
