@@ -39,48 +39,22 @@ jobs:
       - name: Read annotated tag notes
         id: tag_notes
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          $gitPath = Get-Command git -CommandType Application | Select-Object -First 1 -ExpandProperty Source
-          if ([string]::IsNullOrWhiteSpace($gitPath)) {
-            throw '无法定位 git.exe'
+          $headers = @{
+            Authorization = "Bearer $env:GITHUB_TOKEN"
+            Accept = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2022-11-28'
           }
-
-          $remoteTagRef = "refs/tags/$env:GITHUB_REF_NAME"
-          $localTagRef = 'refs/codex/release_tag'
-          git update-ref -d $localTagRef 2>$null
-          & $gitPath fetch --force origin "+$remoteTagRef:$localTagRef"
-          if ($LASTEXITCODE -ne 0) {
-            throw "无法从 origin 获取 tag: $env:GITHUB_REF_NAME"
-          }
-
-          $tagType = & $gitPath cat-file -t $localTagRef
-          if ($LASTEXITCODE -ne 0) {
-            throw "无法读取 tag 对象: $env:GITHUB_REF_NAME"
-          }
-          $tagType = ($tagType | Out-String).Trim()
-          if ($tagType -ne 'tag') {
+          $refUrl = "https://api.github.com/repos/${{ github.repository }}/git/ref/tags/$env:GITHUB_REF_NAME"
+          $refObject = Invoke-RestMethod -Headers $headers -Uri $refUrl
+          if ($refObject.object.type -ne 'tag') {
             throw "发布必须使用 annotated tag。$env:GITHUB_REF_NAME 当前不是 annotated tag。"
           }
 
-          $notesPath = Join-Path $PWD 'tag-notes.txt'
-          $notesErrorPath = Join-Path $PWD 'tag-notes.stderr.txt'
-          Remove-Item $notesPath, $notesErrorPath -ErrorAction SilentlyContinue
-
-          & $gitPath for-each-ref $localTagRef '--format=%(contents)' 1> $notesPath 2> $notesErrorPath
-          if ($LASTEXITCODE -ne 0) {
-            $stderr = if (Test-Path $notesErrorPath) {
-              [System.IO.File]::ReadAllText($notesErrorPath, [System.Text.UTF8Encoding]::new($false))
-            } else {
-              ''
-            }
-            throw "无法读取 annotated tag 说明: $env:GITHUB_REF_NAME`n$stderr"
-          }
-
-          $notes = if (Test-Path $notesPath) {
-            [System.IO.File]::ReadAllText($notesPath, [System.Text.UTF8Encoding]::new($false))
-          } else {
-            ''
-          }
+          $tagObject = Invoke-RestMethod -Headers $headers -Uri $refObject.object.url
+          $notes = [string]$tagObject.message
           if ([string]::IsNullOrWhiteSpace($notes)) {
             throw "annotated tag 说明不能为空: $env:GITHUB_REF_NAME"
           }
