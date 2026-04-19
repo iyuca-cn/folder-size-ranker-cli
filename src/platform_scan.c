@@ -154,6 +154,7 @@ static MftscanError mftscan_platform_ingest_file(
     MftscanContext *context,
     uint64_t frn,
     uint64_t parent_frn,
+    const wchar_t *name,
     uint64_t logical_size,
     uint64_t allocated_size) {
     MftscanRecordInfo record_info;
@@ -165,7 +166,19 @@ static MftscanError mftscan_platform_ingest_file(
     record_info.allocated_size = allocated_size;
     record_info.in_use = true;
     record_info.is_directory = false;
-    return mftscan_ingest_record(context, &record_info);
+    record_info.name_priority = 3U;
+    if (name != NULL) {
+        record_info.name = mftscan_strdup_w(name);
+        if (record_info.name == NULL) {
+            return MFTSCAN_ERROR_OUT_OF_MEMORY;
+        }
+    }
+
+    {
+        MftscanError error_code = mftscan_ingest_record(context, &record_info);
+        mftscan_free_record_info(&record_info);
+        return error_code;
+    }
 }
 
 static bool mftscan_next_platform_id(uint64_t *next_frn, uint64_t *frn) {
@@ -307,6 +320,7 @@ MftscanError mftscan_scan_volume_platform(MftscanContext *context, const Mftscan
                     context,
                     record_frn,
                     current_directory.frn,
+                    find_data.cFileName,
                     logical_size,
                     allocated_size);
                 if (error_code != MFTSCAN_OK) {

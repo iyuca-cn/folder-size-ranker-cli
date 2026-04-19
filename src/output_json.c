@@ -14,8 +14,11 @@ typedef struct MftscanAllTree {
     size_t *parent_indices;
     size_t *child_offsets;
     size_t *child_indices;
+    size_t *file_offsets;
+    size_t *file_indices;
     size_t count;
     size_t child_count;
+    size_t file_count;
     size_t root_index;
 } MftscanAllTree;
 
@@ -29,6 +32,12 @@ static uint64_t mftscan_all_sort_value(const MftscanOptions *options, const Mfts
     return (options->sort_mode == MFTSCAN_SORT_ALLOCATED)
         ? tree->allocated_totals[index]
         : tree->logical_totals[index];
+}
+
+static uint64_t mftscan_all_file_sort_value(const MftscanOptions *options, const MftscanFileNode *file_node) {
+    return (options->sort_mode == MFTSCAN_SORT_ALLOCATED)
+        ? file_node->allocated_size
+        : file_node->logical_size;
 }
 
 static bool mftscan_all_directory_ready(const MftscanDirNode *directory_node) {
@@ -72,6 +81,42 @@ static int __cdecl mftscan_compare_all_children(void *context, const void *left_
     return 0;
 }
 
+static int __cdecl mftscan_compare_all_files(void *context, const void *left_value, const void *right_value) {
+    const MftscanAllSortContext *sort_context = (const MftscanAllSortContext *)context;
+    size_t left_index = *(const size_t *)left_value;
+    size_t right_index = *(const size_t *)right_value;
+    const MftscanFileNode *left_node = &sort_context->context->files.items[left_index];
+    const MftscanFileNode *right_node = &sort_context->context->files.items[right_index];
+    uint64_t left_sort = mftscan_all_file_sort_value(sort_context->options, left_node);
+    uint64_t right_sort = mftscan_all_file_sort_value(sort_context->options, right_node);
+
+    if (left_sort < right_sort) {
+        return 1;
+    }
+    if (left_sort > right_sort) {
+        return -1;
+    }
+    if (left_node->name == NULL && right_node->name != NULL) {
+        return 1;
+    }
+    if (left_node->name != NULL && right_node->name == NULL) {
+        return -1;
+    }
+    if (left_node->name != NULL && right_node->name != NULL) {
+        int name_compare = _wcsicmp(left_node->name, right_node->name);
+        if (name_compare != 0) {
+            return name_compare;
+        }
+    }
+    if (left_node->frn < right_node->frn) {
+        return -1;
+    }
+    if (left_node->frn > right_node->frn) {
+        return 1;
+    }
+    return 0;
+}
+
 static void mftscan_all_tree_free(MftscanAllTree *tree) {
     if (tree == NULL) {
         return;
@@ -82,6 +127,8 @@ static void mftscan_all_tree_free(MftscanAllTree *tree) {
     free(tree->parent_indices);
     free(tree->child_offsets);
     free(tree->child_indices);
+    free(tree->file_offsets);
+    free(tree->file_indices);
     memset(tree, 0, sizeof(*tree));
     tree->root_index = MFTSCAN_NO_INDEX;
 }
@@ -134,7 +181,9 @@ static MftscanError mftscan_all_tree_build(
     const MftscanOptions *options,
     MftscanAllTree *tree) {
     size_t *child_counts = NULL;
+    size_t *file_counts = NULL;
     size_t *write_offsets = NULL;
+    size_t *write_file_offsets = NULL;
     size_t index = 0;
     size_t running_offset = 0;
     MftscanError error_code = MFTSCAN_OK;
@@ -154,14 +203,20 @@ static MftscanError mftscan_all_tree_build(
     tree->allocated_totals = (uint64_t *)calloc(tree->count, sizeof(uint64_t));
     tree->parent_indices = (size_t *)calloc(tree->count, sizeof(size_t));
     tree->child_offsets = (size_t *)calloc(tree->count + 1U, sizeof(size_t));
+    tree->file_offsets = (size_t *)calloc(tree->count + 1U, sizeof(size_t));
     child_counts = (size_t *)calloc(tree->count, sizeof(size_t));
+    file_counts = (size_t *)calloc(tree->count, sizeof(size_t));
     write_offsets = (size_t *)calloc(tree->count, sizeof(size_t));
+    write_file_offsets = (size_t *)calloc(tree->count, sizeof(size_t));
     if (tree->logical_totals == NULL ||
         tree->allocated_totals == NULL ||
         tree->parent_indices == NULL ||
         tree->child_offsets == NULL ||
+        tree->file_offsets == NULL ||
         child_counts == NULL ||
-        write_offsets == NULL) {
+        file_counts == NULL ||
+        write_offsets == NULL ||
+        write_file_offsets == NULL) {
         error_code = MFTSCAN_ERROR_OUT_OF_MEMORY;
         goto cleanup;
     }
@@ -182,12 +237,34 @@ static MftscanError mftscan_all_tree_build(
         }
     }
 
+    for (index = 0; index < context->files.count; ++index) {
+        size_t parent_index = MFTSCAN_NO_INDEX;
+        const MftscanFileNode *file_node = &context->files.items[index];
+
+        if (file_node->parent_frn == 0ULL || file_node->parent_frn == file_node->frn) {
+            continue;
+        }
+        if (file_node->name == NULL || file_node->name[0] == L'\0') {
+            continue;
+        }
+        if (mftscan_map_get(&context->directory_index, file_node->parent_frn, &parent_index)) {
+            file_counts[parent_index] += 1U;
+        }
+    }
+
     for (index = 0; index < tree->count; ++index) {
         tree->child_offsets[index] = running_offset;
         running_offset += child_counts[index];
     }
     tree->child_offsets[tree->count] = running_offset;
     tree->child_count = running_offset;
+    running_offset = 0U;
+    for (index = 0; index < tree->count; ++index) {
+        tree->file_offsets[index] = running_offset;
+        running_offset += file_counts[index];
+    }
+    tree->file_offsets[tree->count] = running_offset;
+    tree->file_count = running_offset;
 
     if (tree->child_count > 0U) {
         tree->child_indices = (size_t *)calloc(tree->child_count, sizeof(size_t));
@@ -201,6 +278,30 @@ static MftscanError mftscan_all_tree_build(
             size_t parent_index = tree->parent_indices[index];
             if (parent_index != MFTSCAN_NO_INDEX) {
                 tree->child_indices[write_offsets[parent_index]++] = index;
+            }
+        }
+    }
+
+    if (tree->file_count > 0U) {
+        tree->file_indices = (size_t *)calloc(tree->file_count, sizeof(size_t));
+        if (tree->file_indices == NULL) {
+            error_code = MFTSCAN_ERROR_OUT_OF_MEMORY;
+            goto cleanup;
+        }
+
+        memcpy(write_file_offsets, tree->file_offsets, tree->count * sizeof(size_t));
+        for (index = 0; index < context->files.count; ++index) {
+            size_t parent_index = MFTSCAN_NO_INDEX;
+            const MftscanFileNode *file_node = &context->files.items[index];
+
+            if (file_node->parent_frn == 0ULL || file_node->parent_frn == file_node->frn) {
+                continue;
+            }
+            if (file_node->name == NULL || file_node->name[0] == L'\0') {
+                continue;
+            }
+            if (mftscan_map_get(&context->directory_index, file_node->parent_frn, &parent_index)) {
+                tree->file_indices[write_file_offsets[parent_index]++] = index;
             }
         }
     }
@@ -235,7 +336,9 @@ static MftscanError mftscan_all_tree_build(
     }
 
 cleanup:
+    free(write_file_offsets);
     free(write_offsets);
+    free(file_counts);
     free(child_counts);
     if (error_code != MFTSCAN_OK) {
         mftscan_all_tree_free(tree);
@@ -261,6 +364,8 @@ static MftscanError mftscan_all_sort_children(
     for (index = 0; index < tree->count; ++index) {
         size_t child_start = tree->child_offsets[index];
         size_t child_count = tree->child_offsets[index + 1U] - child_start;
+        size_t file_start = tree->file_offsets[index];
+        size_t file_count = tree->file_offsets[index + 1U] - file_start;
         if (child_count > 1U) {
             qsort_s(
                 tree->child_indices + child_start,
@@ -269,8 +374,77 @@ static MftscanError mftscan_all_sort_children(
                 mftscan_compare_all_children,
                 &sort_context);
         }
+        if (file_count > 1U) {
+            qsort_s(
+                tree->file_indices + file_start,
+                file_count,
+                sizeof(size_t),
+                mftscan_compare_all_files,
+                &sort_context);
+        }
     }
 
+    return MFTSCAN_OK;
+}
+
+static wchar_t *mftscan_all_join_path(const wchar_t *parent_path, const wchar_t *child_name) {
+    size_t parent_length = 0;
+    size_t child_length = 0;
+    bool needs_separator = false;
+    size_t total_length = 0;
+    wchar_t *joined_path = NULL;
+
+    if (parent_path == NULL || child_name == NULL) {
+        return NULL;
+    }
+
+    parent_length = wcslen(parent_path);
+    child_length = wcslen(child_name);
+    needs_separator = parent_length > 0U && parent_path[parent_length - 1U] != L'\\';
+    total_length = parent_length + child_length + (needs_separator ? 1U : 0U);
+    joined_path = (wchar_t *)calloc(total_length + 1U, sizeof(wchar_t));
+    if (joined_path == NULL) {
+        return NULL;
+    }
+
+    memcpy(joined_path, parent_path, parent_length * sizeof(wchar_t));
+    if (needs_separator) {
+        joined_path[parent_length++] = L'\\';
+    }
+    memcpy(joined_path + parent_length, child_name, child_length * sizeof(wchar_t));
+    joined_path[total_length] = L'\0';
+    return joined_path;
+}
+
+static MftscanError mftscan_all_build_file_path(
+    const MftscanContext *context,
+    const MftscanFileNode *file_node,
+    wchar_t **path_text) {
+    wchar_t *parent_path = NULL;
+    wchar_t *file_path = NULL;
+    MftscanError error_code = MFTSCAN_OK;
+
+    if (context == NULL || file_node == NULL || path_text == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    *path_text = NULL;
+    if (file_node->name == NULL || file_node->name[0] == L'\0') {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    error_code = mftscan_build_path(context, file_node->parent_frn, &parent_path);
+    if (error_code != MFTSCAN_OK) {
+        return error_code;
+    }
+
+    file_path = mftscan_all_join_path(parent_path, file_node->name);
+    free(parent_path);
+    if (file_path == NULL) {
+        return MFTSCAN_ERROR_OUT_OF_MEMORY;
+    }
+
+    *path_text = file_path;
     return MFTSCAN_OK;
 }
 
@@ -281,10 +455,13 @@ static MftscanError mftscan_all_add_json_node(
     const MftscanOptions *options,
     const MftscanAllTree *tree,
     size_t directory_index) {
+    yyjson_mut_val *files_array = NULL;
     yyjson_mut_val *children_array = NULL;
     wchar_t *path_text = NULL;
     char *path_utf8 = NULL;
+    size_t file_position = 0;
     size_t child_position = 0;
+    size_t emitted_file_count = 0;
     size_t emitted_count = 0;
     MftscanError error_code = MFTSCAN_OK;
 
@@ -292,8 +469,9 @@ static MftscanError mftscan_all_add_json_node(
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
     }
 
+    files_array = yyjson_mut_arr(document);
     children_array = yyjson_mut_arr(document);
-    if (children_array == NULL) {
+    if (files_array == NULL || children_array == NULL) {
         return MFTSCAN_ERROR_JSON;
     }
 
@@ -310,11 +488,56 @@ static MftscanError mftscan_all_add_json_node(
 
     if (!yyjson_mut_obj_add_strcpy(document, node_object, "path", path_utf8) ||
         !yyjson_mut_obj_add_uint(document, node_object, "bytes", mftscan_all_sort_value(options, tree, directory_index)) ||
+        !yyjson_mut_obj_add_val(document, node_object, "files", files_array) ||
         !yyjson_mut_obj_add_val(document, node_object, "children", children_array)) {
         free(path_utf8);
         return MFTSCAN_ERROR_JSON;
     }
     free(path_utf8);
+
+    for (file_position = tree->file_offsets[directory_index];
+         file_position < tree->file_offsets[directory_index + 1U];
+         ++file_position) {
+        size_t file_index = tree->file_indices[file_position];
+        const MftscanFileNode *file_node = &context->files.items[file_index];
+        uint64_t file_size = mftscan_all_file_sort_value(options, file_node);
+        yyjson_mut_val *file_object = NULL;
+        wchar_t *file_path = NULL;
+        char *file_path_utf8 = NULL;
+
+        if (file_size < options->min_size) {
+            break;
+        }
+        if (options->has_limit && emitted_file_count >= options->limit) {
+            break;
+        }
+
+        error_code = mftscan_all_build_file_path(context, file_node, &file_path);
+        if (error_code != MFTSCAN_OK) {
+            return error_code;
+        }
+
+        file_path_utf8 = mftscan_utf8_from_wide(file_path);
+        free(file_path);
+        if (file_path_utf8 == NULL) {
+            return MFTSCAN_ERROR_OUT_OF_MEMORY;
+        }
+
+        file_object = yyjson_mut_arr_add_obj(document, files_array);
+        if (file_object == NULL) {
+            free(file_path_utf8);
+            return MFTSCAN_ERROR_JSON;
+        }
+
+        if (!yyjson_mut_obj_add_strcpy(document, file_object, "path", file_path_utf8) ||
+            !yyjson_mut_obj_add_uint(document, file_object, "bytes", file_size)) {
+            free(file_path_utf8);
+            return MFTSCAN_ERROR_JSON;
+        }
+
+        free(file_path_utf8);
+        emitted_file_count += 1U;
+    }
 
     for (child_position = tree->child_offsets[directory_index];
          child_position < tree->child_offsets[directory_index + 1U];

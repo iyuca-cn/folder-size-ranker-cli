@@ -26,11 +26,14 @@
 指定 `--all` 时：
 
 - 输出根节点为 `--location` 指定的目录或盘符根目录。
+- `files` 包含当前目录下的直接文件。
 - `children` 包含直接子目录，子目录下继续递归包含更深层目录。
 - 每个目录的 `bytes` 是该目录自身及所有后代目录中文件大小的递归汇总。
+- 每个文件的 `bytes` 是该文件自身大小。
+- 每一层 `files` 都按 `bytes` 从大到小排序。
 - 每一层 `children` 都按 `bytes` 从大到小排序。
-- `--min-size` 会过滤每层中小于指定大小的子目录；根节点始终输出。
-- `--limit` 表示每层最多输出多少个直接子目录。
+- `--min-size` 会过滤每层中小于指定大小的文件和子目录；根节点始终输出。
+- `--limit` 表示每层最多输出多少个直接文件，以及多少个直接子目录。
 - `--all` 固定输出紧凑 JSON，不接受 `--format`。
 
 输出结果始终只有一个大小字段：
@@ -98,7 +101,7 @@ folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> --all [-
 - `--location` 指向非 NTFS 子目录时，程序仍走平台 API 降级路径，并在输出阶段按该目录子树过滤。
 - `--volume` 已废弃，不再支持。
 - `--all` 与 `--format` 互斥；指定 `--all` 时输出固定为紧凑 JSON。
-- 默认模式下 `--limit` 表示输出前 N 条；`--all` 模式下 `--limit` 表示每层最多输出 N 个直接子目录。
+- 默认模式下 `--limit` 表示输出前 N 条；`--all` 模式下 `--limit` 表示每层最多输出 N 个直接文件，以及 N 个直接子目录。
 
 `--min-size` 使用的字段和 `--sort` 一致：
 
@@ -155,7 +158,7 @@ folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> --all [-
 .\x64\Release\folder-size-ranker-cli.exe --location C:\Windows --sort allocated --format table --limit 20
 ```
 
-输出 `C:\Users` 下所有层级目录的紧凑 JSON 树，每层最多 10 个直接子目录：
+输出 `C:\Users` 下所有层级目录与直接文件的紧凑 JSON 树，每层最多 10 个直接文件和 10 个直接子目录：
 
 ```powershell
 .\x64\Release\folder-size-ranker-cli.exe --location C:\Users --sort allocated --all --min-size 104857600 --limit 10
@@ -204,13 +207,14 @@ JSON 输出为 UTF-8，结构如下：
 `--all` 输出为紧凑 JSON，结构如下：
 
 ```json
-{"path":"C:\\Users","bytes":123469824,"children":[{"path":"C:\\Users\\Alice","bytes":123469824,"children":[]}]}
+{"path":"C:\\Users","bytes":123469824,"files":[{"path":"C:\\Users\\desktop.ini","bytes":174}],"children":[{"path":"C:\\Users\\Alice","bytes":123469824,"files":[],"children":[]}]}
 ```
 
 字段说明：
 
 - `path`：当前目录路径。
-- `bytes`：当前目录自身及所有后代目录中文件大小的递归汇总，字段含义由 `--sort` 决定。
+- `bytes`：目录节点表示当前目录自身及所有后代目录中文件大小的递归汇总；文件节点表示单文件大小，字段含义都由 `--sort` 决定。
+- `files`：当前目录的直接文件，已按 `bytes` 降序排序。
 - `children`：当前目录的直接子目录，已按 `bytes` 降序排序，并递归包含更深层目录。
 
 ## 注意事项

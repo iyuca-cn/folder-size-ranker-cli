@@ -725,8 +725,8 @@ void mftscan_print_help(FILE *stream) {
         "  - 指向 NTFS 子目录时，仍会扫描整卷 MFT，再只输出该目录子树\n"
         "  - --volume 已废弃，请改用 --location\n"
         "  - 默认只输出没有子文件夹的文件夹\n"
-        "  - --all 输出指定位置下所有层级目录的紧凑 JSON 树，且不接受 --format\n"
-        "  - --all 模式下 --limit 表示每层最多输出的直接子目录数量\n"
+        "  - --all 输出指定位置下所有层级目录和直接文件的紧凑 JSON 树，且不接受 --format\n"
+        "  - --all 模式下 --limit 表示每层最多输出的直接文件数量和直接子目录数量\n"
         "  - NTFS MFT 路径需要管理员权限，平台 API 降级路径不做管理员前置要求\n");
 }
 

@@ -37,6 +37,35 @@ static MftscanError mftscan_ensure_directory(MftscanContext *context, uint64_t f
     return MFTSCAN_OK;
 }
 
+static MftscanError mftscan_append_file(MftscanContext *context, MftscanRecordInfo *record_info) {
+    size_t file_index = 0;
+    MftscanFileNode *grown_items = NULL;
+
+    if (context == NULL || record_info == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    grown_items = (MftscanFileNode *)mftscan_realloc_array(
+        context->files.items,
+        sizeof(MftscanFileNode),
+        &context->files.capacity,
+        context->files.count + 1U);
+    if (grown_items == NULL) {
+        return MFTSCAN_ERROR_OUT_OF_MEMORY;
+    }
+
+    context->files.items = grown_items;
+    file_index = context->files.count++;
+    memset(&context->files.items[file_index], 0, sizeof(MftscanFileNode));
+    context->files.items[file_index].frn = record_info->frn;
+    context->files.items[file_index].parent_frn = record_info->parent_frn;
+    context->files.items[file_index].name = record_info->name;
+    context->files.items[file_index].logical_size = record_info->logical_size;
+    context->files.items[file_index].allocated_size = record_info->allocated_size;
+    record_info->name = NULL;
+    return MFTSCAN_OK;
+}
+
 static uint64_t mftscan_sort_value(const MftscanLeafResult *item, MftscanSortMode sort_mode) {
     return (sort_mode == MFTSCAN_SORT_ALLOCATED) ? item->allocated_size : item->logical_size;
 }
@@ -101,11 +130,18 @@ void mftscan_context_free(MftscanContext *context) {
     for (index = 0; index < context->directories.count; ++index) {
         free(context->directories.items[index].name);
     }
+    for (index = 0; index < context->files.count; ++index) {
+        free(context->files.items[index].name);
+    }
 
     free(context->directories.items);
+    free(context->files.items);
     context->directories.items = NULL;
     context->directories.count = 0;
     context->directories.capacity = 0;
+    context->files.items = NULL;
+    context->files.count = 0;
+    context->files.capacity = 0;
     mftscan_map_free(&context->directory_index);
     mftscan_map_free(&context->seen_files);
 }
@@ -168,7 +204,11 @@ MftscanError mftscan_ingest_record(MftscanContext *context, MftscanRecordInfo *r
         directory_node->allocated_size += record_info->allocated_size;
     }
 
-    return MFTSCAN_OK;
+    if (record_info->name == NULL || record_info->name[0] == L'\0') {
+        return MFTSCAN_OK;
+    }
+
+    return mftscan_append_file(context, record_info);
 }
 
 MftscanError mftscan_build_results(const MftscanContext *context, const MftscanOptions *options, MftscanScanResult *scan_result) {

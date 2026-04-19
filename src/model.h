@@ -31,6 +31,20 @@ typedef struct MftscanDirVector {
     size_t capacity;
 } MftscanDirVector;
 
+typedef struct MftscanFileNode {
+    uint64_t frn;
+    uint64_t parent_frn;
+    wchar_t *name;
+    uint64_t logical_size;
+    uint64_t allocated_size;
+} MftscanFileNode;
+
+typedef struct MftscanFileVector {
+    MftscanFileNode *items;
+    size_t count;
+    size_t capacity;
+} MftscanFileVector;
+
 typedef struct MftscanUint64MapEntry {
     uint64_t key;
     size_t value;
@@ -65,6 +79,7 @@ typedef struct MftscanVolumeHandle {
 struct MftscanContext {
     wchar_t volume[3];
     MftscanDirVector directories;
+    MftscanFileVector files;
     MftscanUint64Map directory_index;
     MftscanUint64Map seen_files;
 };
