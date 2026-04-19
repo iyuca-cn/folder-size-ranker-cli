@@ -40,15 +40,20 @@ jobs:
         id: tag_notes
         shell: pwsh
         run: |
+          $gitPath = Get-Command git -CommandType Application | Select-Object -First 1 -ExpandProperty Source
+          if ([string]::IsNullOrWhiteSpace($gitPath)) {
+            throw '无法定位 git.exe'
+          }
+
           $remoteTagRef = "refs/tags/$env:GITHUB_REF_NAME"
           $localTagRef = 'refs/tags/__release_tag__'
           git update-ref -d $localTagRef 2>$null
-          git fetch --force origin "+$remoteTagRef:$localTagRef"
+          & $gitPath fetch --force origin "+$remoteTagRef:$localTagRef"
           if ($LASTEXITCODE -ne 0) {
             throw "无法从 origin 获取 tag: $env:GITHUB_REF_NAME"
           }
 
-          $tagType = git cat-file -t $localTagRef
+          $tagType = & $gitPath cat-file -t $localTagRef
           if ($LASTEXITCODE -ne 0) {
             throw "无法读取 tag 对象: $env:GITHUB_REF_NAME"
           }
@@ -61,16 +66,8 @@ jobs:
           $notesErrorPath = Join-Path $PWD 'tag-notes.stderr.txt'
           Remove-Item $notesPath, $notesErrorPath -ErrorAction SilentlyContinue
 
-          $process = Start-Process `
-            -FilePath 'git' `
-            -ArgumentList @('for-each-ref', $localTagRef, '--format=%(contents)') `
-            -NoNewWindow `
-            -Wait `
-            -PassThru `
-            -RedirectStandardOutput $notesPath `
-            -RedirectStandardError $notesErrorPath
-
-          if ($process.ExitCode -ne 0) {
+          & $gitPath for-each-ref $localTagRef '--format=%(contents)' 1> $notesPath 2> $notesErrorPath
+          if ($LASTEXITCODE -ne 0) {
             $stderr = if (Test-Path $notesErrorPath) {
               [System.IO.File]::ReadAllText($notesErrorPath, [System.Text.UTF8Encoding]::new($false))
             } else {
