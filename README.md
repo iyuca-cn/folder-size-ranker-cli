@@ -6,7 +6,7 @@
 
 ## 作用
 
-- NTFS 卷直接读取指定盘符的 MFT，不递归遍历目录。
+- NTFS 卷直接读取目标所在盘符的 MFT，不递归遍历目录。
 - 非 NTFS 卷使用 Win32 平台 API 降级扫描，通过显式栈迭代遍历目录树，不使用递归函数。
 - 统计叶子目录的文件大小。
 - 支持按逻辑大小或分配大小排序。
@@ -58,19 +58,25 @@ x64\Release\folder-size-ranker-cli.exe
 ## CLI 用法
 
 ```text
-folder-size-ranker-cli.exe --volume C: --sort <logical|allocated> [--min-size expr] [--format <table|json>] [--limit N]
+folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> [--min-size expr] [--format <table|json>] [--limit N]
 ```
 
 参数说明：
 
 | 参数 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `--volume <X:>` | 是 | 无 | 指定要扫描的单个盘符，例如 `C:` |
+| `--location <path>` | 是 | 无 | 指定扫描位置，可以是 `C:`、`C:\` 或某个文件夹 |
 | `--sort <logical|allocated>` | 是 | 无 | 指定排序字段 |
 | `--min-size <expr>` | 否 | `0` | 只输出大小大于等于该值的目录，支持表达式 |
 | `--format <table|json>` | 否 | `table` | 输出表格或 JSON |
 | `--limit <N>` | 否 | 不限制 | 只输出前 N 条 |
 | `--help` | 否 | 无 | 显示帮助 |
+
+说明：
+
+- `--location` 指向 NTFS 子目录时，程序仍会扫描整卷 MFT，再只输出该目录子树内的叶子目录。
+- `--location` 指向非 NTFS 子目录时，程序仍走平台 API 降级路径，并在输出阶段按该目录子树过滤。
+- `--volume` 已废弃，不再支持。
 
 `--min-size` 使用的字段和 `--sort` 一致：
 
@@ -92,7 +98,7 @@ folder-size-ranker-cli.exe --volume C: --sort <logical|allocated> [--min-size ex
 如果表达式里包含空格或括号，建议加引号，例如：
 
 ```powershell
-.\x64\Release\folder-size-ranker-cli.exe --volume C: --sort logical --min-size "(1.5 + 0.5) * 1024 * 1024"
+.\x64\Release\folder-size-ranker-cli.exe --location C: --sort logical --min-size "(1.5 + 0.5) * 1024 * 1024"
 ```
 
 ## 示例
@@ -100,25 +106,31 @@ folder-size-ranker-cli.exe --volume C: --sort <logical|allocated> [--min-size ex
 输出 `C:` 盘最大的 20 个叶子目录，按分配大小排序：
 
 ```powershell
-.\x64\Release\folder-size-ranker-cli.exe --volume C: --sort allocated --format table --limit 20
+.\x64\Release\folder-size-ranker-cli.exe --location C: --sort allocated --format table --limit 20
 ```
 
 输出 `C:` 盘逻辑大小至少 1 GiB 的叶子目录：
 
 ```powershell
-.\x64\Release\folder-size-ranker-cli.exe --volume C: --sort logical --min-size 1073741824 --format table
+.\x64\Release\folder-size-ranker-cli.exe --location C: --sort logical --min-size 1073741824 --format table
 ```
 
 使用表达式指定最小值：
 
 ```powershell
-.\x64\Release\folder-size-ranker-cli.exe --volume C: --sort allocated --min-size "(1.5+0.5)*1024*1024" --format table
+.\x64\Release\folder-size-ranker-cli.exe --location C: --sort allocated --min-size "(1.5+0.5)*1024*1024" --format table
 ```
 
 输出 JSON，方便脚本处理：
 
 ```powershell
-.\x64\Release\folder-size-ranker-cli.exe --volume C: --sort allocated --min-size 104857600 --format json --limit 50
+.\x64\Release\folder-size-ranker-cli.exe --location C: --sort allocated --min-size 104857600 --format json --limit 50
+```
+
+只看某个子目录：
+
+```powershell
+.\x64\Release\folder-size-ranker-cli.exe --location C:\Windows --sort allocated --format table --limit 20
 ```
 
 ## 表格输出
@@ -137,6 +149,7 @@ JSON 输出为 UTF-8，结构如下：
 ```json
 {
   "volume": "C:",
+  "location": "C:\\Windows",
   "sort_by": "allocated",
   "min_size": 104857600,
   "total_leaf_dirs": 2,
@@ -151,7 +164,8 @@ JSON 输出为 UTF-8，结构如下：
 
 字段说明：
 
-- `volume`：扫描的盘符。
+- `volume`：程序内部实际扫描的盘符。
+- `location`：用户请求的扫描位置。
 - `sort_by`：排序字段。
 - `min_size`：最小大小过滤值。
 - `total_leaf_dirs`：输出结果条数。
@@ -162,7 +176,8 @@ JSON 输出为 UTF-8，结构如下：
 - NTFS 快路径读取底层结构，必须管理员权限运行。
 - 非 NTFS 降级路径使用平台 API 迭代遍历，速度通常慢于 NTFS MFT 快路径。
 - 非 NTFS 降级路径会跳过目录型 reparse point，避免 junction、符号链接等导致循环或重复扫描。
-- 当前只支持单个盘符扫描。
+- 当前一次只会解析一个 `--location`，其所属位置必须位于类似 `C:` 的本地盘符上。
+- 若部分本地虚拟盘 / RamDisk 对文件夹路径返回异常卷根，程序会回退到所属盘符继续扫描；真正挂载到文件夹的卷仍不支持。
 - 当前只输出叶子目录，不输出父目录汇总。
 - 当前第一版优先保证正确性和结构清晰，后续可以继续优化性能和输出格式。
 

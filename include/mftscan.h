@@ -32,11 +32,14 @@ typedef enum MftscanError {
 
 typedef struct MftscanOptions {
     wchar_t volume[3];
+    wchar_t *location;
+    wchar_t *filter_root;
     MftscanSortMode sort_mode;
     MftscanOutputFormat format;
     uint64_t min_size;
     size_t limit;
     bool has_limit;
+    bool filter_by_location;
 } MftscanOptions;
 
 typedef struct MftscanLeafResult {
@@ -55,6 +58,7 @@ typedef struct MftscanContext MftscanContext;
 
 bool mftscan_is_process_elevated(void);
 MftscanError mftscan_parse_options(int argc, wchar_t **argv, MftscanOptions *options, bool *show_help);
+void mftscan_free_options(MftscanOptions *options);
 void mftscan_print_help(FILE *stream);
 const char *mftscan_error_message(MftscanError error_code);
 const char *mftscan_error_detail(void);

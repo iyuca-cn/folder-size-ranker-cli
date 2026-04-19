@@ -10,6 +10,7 @@ MftscanError mftscan_output_json(const MftscanOptions *options, const MftscanSca
     yyjson_mut_val *root_object = NULL;
     yyjson_mut_val *items_array = NULL;
     char *volume_utf8 = NULL;
+    char *location_utf8 = NULL;
     char *json_text = NULL;
     size_t json_length = 0;
     size_t index = 0;
@@ -38,7 +39,14 @@ MftscanError mftscan_output_json(const MftscanOptions *options, const MftscanSca
         goto cleanup;
     }
 
+    location_utf8 = mftscan_utf8_from_wide((options->location != NULL) ? options->location : options->volume);
+    if (location_utf8 == NULL) {
+        error_code = MFTSCAN_ERROR_OUT_OF_MEMORY;
+        goto cleanup;
+    }
+
     if (!yyjson_mut_obj_add_strcpy(document, root_object, "volume", volume_utf8) ||
+        !yyjson_mut_obj_add_strcpy(document, root_object, "location", location_utf8) ||
         !yyjson_mut_obj_add_strcpy(document, root_object, "sort_by",
             (options->sort_mode == MFTSCAN_SORT_ALLOCATED) ? "allocated" : "logical") ||
         !yyjson_mut_obj_add_uint(document, root_object, "min_size", options->min_size) ||
@@ -91,6 +99,7 @@ MftscanError mftscan_output_json(const MftscanOptions *options, const MftscanSca
     }
 
 cleanup:
+    free(location_utf8);
     free(volume_utf8);
     free(json_text);
     yyjson_mut_doc_free(document);

@@ -20,17 +20,21 @@ int wmain(int argc, wchar_t **argv) {
     bool show_help = false;
     int exit_code = 0;
 
+    (void)SetConsoleOutputCP(CP_UTF8);
+
     error_code = mftscan_parse_options(argc, argv, &options, &show_help);
     if (error_code != MFTSCAN_OK) {
         mftscan_print_error(error_code);
         if (mftscan_error_detail()[0] == '\0') {
             mftscan_print_help(stderr);
         }
+        mftscan_free_options(&options);
         return (int)error_code;
     }
 
     if (show_help) {
         mftscan_print_help(stdout);
+        mftscan_free_options(&options);
         return 0;
     }
 
@@ -53,5 +57,6 @@ int wmain(int argc, wchar_t **argv) {
 
     mftscan_free_results(&scan_result);
     mftscan_context_free(&context);
+    mftscan_free_options(&options);
     return exit_code;
 }

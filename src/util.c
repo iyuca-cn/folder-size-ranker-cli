@@ -144,6 +144,18 @@ char *mftscan_utf8_from_wide(const wchar_t *wide_text) {
     return utf8_text;
 }
 
+void mftscan_free_options(MftscanOptions *options) {
+    if (options == NULL) {
+        return;
+    }
+
+    free(options->location);
+    free(options->filter_root);
+    options->location = NULL;
+    options->filter_root = NULL;
+    options->filter_by_location = false;
+}
+
 const char *mftscan_error_message(MftscanError error_code) {
     switch (error_code) {
     case MFTSCAN_OK:
@@ -478,20 +490,246 @@ static bool mftscan_parse_size_expression(const wchar_t *text, uint64_t *value) 
     return true;
 }
 
+static bool mftscan_is_ascii_drive_letter(wchar_t character) {
+    return (character >= L'a' && character <= L'z') || (character >= L'A' && character <= L'Z');
+}
+
+static bool mftscan_is_path_separator(wchar_t character) {
+    return character == L'\\' || character == L'/';
+}
+
+static bool mftscan_is_drive_designator(const wchar_t *path_text) {
+    return path_text != NULL &&
+        wcslen(path_text) == 2U &&
+        mftscan_is_ascii_drive_letter(path_text[0]) &&
+        path_text[1] == L':';
+}
+
+static bool mftscan_is_drive_root_path(const wchar_t *path_text) {
+    return path_text != NULL &&
+        wcslen(path_text) == 3U &&
+        mftscan_is_ascii_drive_letter(path_text[0]) &&
+        path_text[1] == L':' &&
+        mftscan_is_path_separator(path_text[2]);
+}
+
+static void mftscan_normalize_path_separators(wchar_t *path_text) {
+    if (path_text == NULL) {
+        return;
+    }
+
+    while (*path_text != L'\0') {
+        if (*path_text == L'/') {
+            *path_text = L'\\';
+        }
+        path_text += 1;
+    }
+}
+
+static void mftscan_trim_trailing_separators(wchar_t *path_text) {
+    size_t length = 0;
+
+    if (path_text == NULL) {
+        return;
+    }
+
+    length = wcslen(path_text);
+    while (length > 0U && mftscan_is_path_separator(path_text[length - 1U])) {
+        if (length == 3U && mftscan_is_drive_root_path(path_text)) {
+            break;
+        }
+        path_text[--length] = L'\0';
+    }
+}
+
+static wchar_t *mftscan_alloc_drive_root_path(wchar_t drive_letter) {
+    wchar_t *path_text = (wchar_t *)calloc(4U, sizeof(wchar_t));
+
+    if (path_text == NULL) {
+        return NULL;
+    }
+
+    path_text[0] = (wchar_t)towupper(drive_letter);
+    path_text[1] = L':';
+    path_text[2] = L'\\';
+    path_text[3] = L'\0';
+    return path_text;
+}
+
+static bool mftscan_extract_drive_root(const wchar_t *path_text, wchar_t *drive_root, size_t drive_root_capacity) {
+    if (path_text == NULL || drive_root == NULL || drive_root_capacity < 4U) {
+        return false;
+    }
+
+    if (wcslen(path_text) < 3U) {
+        return false;
+    }
+
+    if (!mftscan_is_ascii_drive_letter(path_text[0]) || path_text[1] != L':' || !mftscan_is_path_separator(path_text[2])) {
+        return false;
+    }
+
+    drive_root[0] = (wchar_t)towupper(path_text[0]);
+    drive_root[1] = L':';
+    drive_root[2] = L'\\';
+    drive_root[3] = L'\0';
+    return true;
+}
+
+static wchar_t *mftscan_get_full_path(const wchar_t *path_text) {
+    DWORD required_length = 0;
+    wchar_t *full_path = NULL;
+    DWORD actual_length = 0;
+
+    required_length = GetFullPathNameW(path_text, 0, NULL, NULL);
+    if (required_length == 0U) {
+        return NULL;
+    }
+
+    full_path = (wchar_t *)calloc((size_t)required_length, sizeof(wchar_t));
+    if (full_path == NULL) {
+        return NULL;
+    }
+
+    actual_length = GetFullPathNameW(path_text, required_length, full_path, NULL);
+    if (actual_length == 0U || actual_length >= required_length) {
+        free(full_path);
+        return NULL;
+    }
+
+    return full_path;
+}
+
+static bool mftscan_is_volume_mount_point_path(const wchar_t *path_text) {
+    wchar_t *mount_point_path = NULL;
+    wchar_t volume_name[MAX_PATH] = { 0 };
+    size_t path_length = 0;
+    bool is_mount_point = false;
+
+    if (path_text == NULL) {
+        return false;
+    }
+
+    path_length = wcslen(path_text);
+    mount_point_path = (wchar_t *)calloc(path_length + 2U, sizeof(wchar_t));
+    if (mount_point_path == NULL) {
+        return false;
+    }
+
+    memcpy(mount_point_path, path_text, path_length * sizeof(wchar_t));
+    if (path_length == 0U || !mftscan_is_path_separator(mount_point_path[path_length - 1U])) {
+        mount_point_path[path_length++] = L'\\';
+    }
+    mount_point_path[path_length] = L'\0';
+
+    is_mount_point = GetVolumeNameForVolumeMountPointW(mount_point_path, volume_name, ARRAYSIZE(volume_name)) != 0;
+    free(mount_point_path);
+    return is_mount_point;
+}
+
+static MftscanError mftscan_parse_location_option(const wchar_t *location_text, MftscanOptions *options) {
+    wchar_t *full_path = NULL;
+    wchar_t volume_root[MAX_PATH] = { 0 };
+    DWORD attributes = INVALID_FILE_ATTRIBUTES;
+
+    if (location_text == NULL || location_text[0] == L'\0') {
+        mftscan_set_error_detail("--location 不能为空");
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (mftscan_is_drive_designator(location_text) || mftscan_is_drive_root_path(location_text)) {
+        options->volume[0] = (wchar_t)towupper(location_text[0]);
+        options->volume[1] = L':';
+        options->volume[2] = L'\0';
+        options->location = mftscan_alloc_drive_root_path(location_text[0]);
+        if (options->location == NULL) {
+            return MFTSCAN_ERROR_OUT_OF_MEMORY;
+        }
+        options->filter_by_location = false;
+        return MFTSCAN_OK;
+    }
+
+    full_path = mftscan_get_full_path(location_text);
+    if (full_path == NULL) {
+        mftscan_set_error_detail("--location 无法解析为有效路径");
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    mftscan_normalize_path_separators(full_path);
+    mftscan_trim_trailing_separators(full_path);
+
+    attributes = GetFileAttributesW(full_path);
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        free(full_path);
+        mftscan_set_error_detail("--location 指定路径不存在或无法访问");
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U) {
+        free(full_path);
+        mftscan_set_error_detail("--location 必须是盘符或文件夹路径");
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (!GetVolumePathNameW(full_path, volume_root, ARRAYSIZE(volume_root))) {
+        free(full_path);
+        mftscan_set_error_detail("--location 无法确定所属盘符");
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    mftscan_normalize_path_separators(volume_root);
+    mftscan_trim_trailing_separators(volume_root);
+    if (!mftscan_is_drive_root_path(volume_root)) {
+        if (mftscan_is_volume_mount_point_path(volume_root)) {
+            free(full_path);
+            mftscan_set_error_detail("--location 暂不支持挂载到文件夹的卷，请改用对应盘符");
+            return MFTSCAN_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!mftscan_extract_drive_root(full_path, volume_root, ARRAYSIZE(volume_root))) {
+            free(full_path);
+            mftscan_set_error_detail("--location 必须位于类似 C: 的本地盘符");
+            return MFTSCAN_ERROR_INVALID_ARGUMENT;
+        }
+    }
+
+    options->volume[0] = (wchar_t)towupper(volume_root[0]);
+    options->volume[1] = L':';
+    options->volume[2] = L'\0';
+    options->location = mftscan_strdup_w(full_path);
+    if (options->location == NULL) {
+        free(full_path);
+        return MFTSCAN_ERROR_OUT_OF_MEMORY;
+    }
+
+    if (!mftscan_is_drive_root_path(full_path)) {
+        options->filter_root = full_path;
+        options->filter_by_location = true;
+        return MFTSCAN_OK;
+    }
+
+    free(full_path);
+    options->filter_by_location = false;
+    return MFTSCAN_OK;
+}
+
 void mftscan_print_help(FILE *stream) {
     fprintf(
         stream,
         "用法:\n"
-        "  folder-size-ranker-cli.exe --volume C: --sort <logical|allocated> [--min-size expr] [--format <table|json>] [--limit N]\n\n"
+        "  folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> [--min-size expr] [--format <table|json>] [--limit N]\n\n"
         "说明:\n"
         "  - NTFS 卷直接读取 MFT，其他文件系统使用平台 API 降级扫描\n"
+        "  - --location 支持盘符根目录或具体文件夹路径\n"
+        "  - 指向 NTFS 子目录时，仍会扫描整卷 MFT，再只输出该目录子树\n"
+        "  - --volume 已废弃，请改用 --location\n"
         "  - 只输出没有子文件夹的文件夹\n"
         "  - NTFS MFT 路径需要管理员权限，平台 API 降级路径不做管理员前置要求\n");
 }
 
 MftscanError mftscan_parse_options(int argc, wchar_t **argv, MftscanOptions *options, bool *show_help) {
     int index = 0;
-    bool has_volume = false;
+    bool has_location = false;
     bool has_sort = false;
 
     if (options == NULL || show_help == NULL) {
@@ -511,24 +749,34 @@ MftscanError mftscan_parse_options(int argc, wchar_t **argv, MftscanOptions *opt
             return MFTSCAN_OK;
         }
 
-        if ((index + 1) >= argc) {
-            return MFTSCAN_ERROR_INVALID_ARGUMENT;
-        }
-
         if (_wcsicmp(argument, L"--volume") == 0) {
-            const wchar_t *volume_text = argv[++index];
-            if (wcslen(volume_text) != 2 || volume_text[1] != L':' ||
-                !((volume_text[0] >= L'a' && volume_text[0] <= L'z') ||
-                    (volume_text[0] >= L'A' && volume_text[0] <= L'Z'))) {
-                mftscan_set_error_detail("--volume 必须是类似 C: 的单个盘符");
+            mftscan_set_error_detail("--volume 已废弃，请改用 --location");
+            return MFTSCAN_ERROR_INVALID_ARGUMENT;
+        } else if (_wcsicmp(argument, L"--location") == 0) {
+            MftscanError location_error = MFTSCAN_OK;
+
+            if ((index + 1) >= argc) {
+                mftscan_set_error_detail("--location 缺少参数值");
                 return MFTSCAN_ERROR_INVALID_ARGUMENT;
             }
-            options->volume[0] = (wchar_t)towupper(volume_text[0]);
-            options->volume[1] = L':';
-            options->volume[2] = L'\0';
-            has_volume = true;
+            if (has_location) {
+                mftscan_set_error_detail("不能重复提供 --location");
+                return MFTSCAN_ERROR_INVALID_ARGUMENT;
+            }
+
+            location_error = mftscan_parse_location_option(argv[++index], options);
+            if (location_error != MFTSCAN_OK) {
+                return location_error;
+            }
+            has_location = true;
         } else if (_wcsicmp(argument, L"--sort") == 0) {
-            const wchar_t *sort_text = argv[++index];
+            const wchar_t *sort_text = NULL;
+
+            if ((index + 1) >= argc) {
+                mftscan_set_error_detail("--sort 缺少参数值");
+                return MFTSCAN_ERROR_INVALID_ARGUMENT;
+            }
+            sort_text = argv[++index];
             if (_wcsicmp(sort_text, L"logical") == 0) {
                 options->sort_mode = MFTSCAN_SORT_LOGICAL;
             } else if (_wcsicmp(sort_text, L"allocated") == 0) {
@@ -539,11 +787,21 @@ MftscanError mftscan_parse_options(int argc, wchar_t **argv, MftscanOptions *opt
             }
             has_sort = true;
         } else if (_wcsicmp(argument, L"--min-size") == 0) {
+            if ((index + 1) >= argc) {
+                mftscan_set_error_detail("--min-size 缺少参数值");
+                return MFTSCAN_ERROR_INVALID_ARGUMENT;
+            }
             if (!mftscan_parse_size_expression(argv[++index], &options->min_size)) {
                 return MFTSCAN_ERROR_INVALID_ARGUMENT;
             }
         } else if (_wcsicmp(argument, L"--format") == 0) {
-            const wchar_t *format_text = argv[++index];
+            const wchar_t *format_text = NULL;
+
+            if ((index + 1) >= argc) {
+                mftscan_set_error_detail("--format 缺少参数值");
+                return MFTSCAN_ERROR_INVALID_ARGUMENT;
+            }
+            format_text = argv[++index];
             if (_wcsicmp(format_text, L"table") == 0) {
                 options->format = MFTSCAN_FORMAT_TABLE;
             } else if (_wcsicmp(format_text, L"json") == 0) {
@@ -554,6 +812,11 @@ MftscanError mftscan_parse_options(int argc, wchar_t **argv, MftscanOptions *opt
             }
         } else if (_wcsicmp(argument, L"--limit") == 0) {
             uint64_t parsed_limit = 0;
+
+            if ((index + 1) >= argc) {
+                mftscan_set_error_detail("--limit 缺少参数值");
+                return MFTSCAN_ERROR_INVALID_ARGUMENT;
+            }
             if (!mftscan_parse_uint64_text(argv[++index], &parsed_limit)) {
                 mftscan_set_error_detail("--limit 必须是非负整数");
                 return MFTSCAN_ERROR_INVALID_ARGUMENT;
@@ -566,8 +829,8 @@ MftscanError mftscan_parse_options(int argc, wchar_t **argv, MftscanOptions *opt
         }
     }
 
-    if (!has_volume || !has_sort) {
-        mftscan_set_error_detail("必须同时提供 --volume 和 --sort");
+    if (!has_location || !has_sort) {
+        mftscan_set_error_detail("必须同时提供 --location 和 --sort");
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
     }
 

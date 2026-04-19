@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #include "model.h"
 
@@ -38,6 +39,25 @@ static MftscanError mftscan_ensure_directory(MftscanContext *context, uint64_t f
 
 static uint64_t mftscan_sort_value(const MftscanLeafResult *item, MftscanSortMode sort_mode) {
     return (sort_mode == MFTSCAN_SORT_ALLOCATED) ? item->allocated_size : item->logical_size;
+}
+
+static bool mftscan_is_path_separator(wchar_t character) {
+    return character == L'\\' || character == L'/';
+}
+
+static bool mftscan_path_matches_filter(const wchar_t *path_text, const wchar_t *filter_root) {
+    size_t filter_length = 0;
+
+    if (path_text == NULL || filter_root == NULL) {
+        return false;
+    }
+
+    filter_length = wcslen(filter_root);
+    if (_wcsnicmp(path_text, filter_root, filter_length) != 0) {
+        return false;
+    }
+
+    return path_text[filter_length] == L'\0' || mftscan_is_path_separator(path_text[filter_length]);
 }
 
 static int __cdecl mftscan_compare_results(void *context, const void *left_value, const void *right_value) {
@@ -184,6 +204,11 @@ MftscanError mftscan_build_results(const MftscanContext *context, const MftscanO
         error_code = mftscan_build_path(context, directory_node->frn, &path_text);
         if (error_code != MFTSCAN_OK) {
             return error_code;
+        }
+
+        if (options->filter_by_location && !mftscan_path_matches_filter(path_text, options->filter_root)) {
+            free(path_text);
+            continue;
         }
 
         grown_items = (MftscanLeafResult *)mftscan_realloc_array(
