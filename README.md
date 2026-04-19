@@ -35,7 +35,7 @@
 - Windows
 - NTFS 卷使用 MFT 快路径；其他文件系统使用平台 API 降级路径。
 - NTFS MFT 快路径需要管理员权限；平台 API 降级路径不做管理员前置要求。
-- x64 构建
+- 支持 x86 / x64 构建
 
 程序清单 `app.manifest` 使用 `asInvoker`。扫描 NTFS 卷时，如果当前进程未提权，程序会提示需要管理员权限；扫描非 NTFS 卷时会直接使用平台 API 降级路径。
 
@@ -47,13 +47,20 @@
 msbuild .\folder-size-ranker-cli.vcxproj /t:Build /p:Configuration=Release /p:Platform=x64
 ```
 
+```powershell
+msbuild .\folder-size-ranker-cli.vcxproj /t:Build /p:Configuration=Release /p:Platform=Win32
+```
+
 构建产物：
 
 ```text
 x64\Release\folder-size-ranker-cli.exe
+x86\Release\folder-size-ranker-cli.exe
 ```
 
 如果当前终端没有 `msbuild`，请先打开 Visual Studio 自带的开发者终端再执行。
+
+Release 配置显式静态链接 CRT，因此发版产物保持为单个 exe 文件。
 
 ## CLI 用法
 
@@ -187,7 +194,9 @@ JSON 输出为 UTF-8，结构如下：
 
 - 普通 `push` / `pull_request` 会自动执行 Windows 编译检查
 - 推送 `v*` annotated tag 会自动创建 GitHub Release
-- Release 会上传由 Action 构建出的 `folder-size-ranker-cli.exe`
+- Release 会上传由 Action 构建出的：
+  - `folder-size-ranker-cli-x86.exe`
+  - `folder-size-ranker-cli-x64.exe`
 - Release notes 使用 annotated tag 的完整多行描述
 
 推荐这样发版：

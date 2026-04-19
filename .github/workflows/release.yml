@@ -21,9 +21,20 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Build Release x86
+        shell: pwsh
+        run: msbuild .\folder-size-ranker-cli.vcxproj /t:Build /p:Configuration=Release /p:Platform=Win32 /m
+
       - name: Build Release x64
         shell: pwsh
         run: msbuild .\folder-size-ranker-cli.vcxproj /t:Build /p:Configuration=Release /p:Platform=x64 /m
+
+      - name: Stage release assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path .\artifacts -Force | Out-Null
+          Copy-Item .\x86\Release\folder-size-ranker-cli.exe .\artifacts\folder-size-ranker-cli-x86.exe -Force
+          Copy-Item .\x64\Release\folder-size-ranker-cli.exe .\artifacts\folder-size-ranker-cli-x64.exe -Force
 
       - name: Read annotated tag notes
         shell: pwsh
@@ -40,4 +51,6 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           body_path: release-notes.md
-          files: x64/Release/folder-size-ranker-cli.exe
+          files: |
+            artifacts/folder-size-ranker-cli-x86.exe
+            artifacts/folder-size-ranker-cli-x64.exe
