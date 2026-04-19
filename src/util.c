@@ -717,13 +717,16 @@ void mftscan_print_help(FILE *stream) {
     fprintf(
         stream,
         "用法:\n"
-        "  folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> [--min-size expr] [--format <table|json>] [--limit N]\n\n"
+        "  folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> [--min-size expr] [--format <table|json>] [--limit N]\n"
+        "  folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> --all [--min-size expr] [--limit N]\n\n"
         "说明:\n"
         "  - NTFS 卷直接读取 MFT，其他文件系统使用平台 API 降级扫描\n"
         "  - --location 支持盘符根目录或具体文件夹路径\n"
         "  - 指向 NTFS 子目录时，仍会扫描整卷 MFT，再只输出该目录子树\n"
         "  - --volume 已废弃，请改用 --location\n"
-        "  - 只输出没有子文件夹的文件夹\n"
+        "  - 默认只输出没有子文件夹的文件夹\n"
+        "  - --all 输出指定位置下所有层级目录的紧凑 JSON 树，且不接受 --format\n"
+        "  - --all 模式下 --limit 表示每层最多输出的直接子目录数量\n"
         "  - NTFS MFT 路径需要管理员权限，平台 API 降级路径不做管理员前置要求\n");
 }
 
@@ -731,6 +734,8 @@ MftscanError mftscan_parse_options(int argc, wchar_t **argv, MftscanOptions *opt
     int index = 0;
     bool has_location = false;
     bool has_sort = false;
+    bool has_format = false;
+    bool has_all = false;
 
     if (options == NULL || show_help == NULL) {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
@@ -801,6 +806,10 @@ MftscanError mftscan_parse_options(int argc, wchar_t **argv, MftscanOptions *opt
                 mftscan_set_error_detail("--format 缺少参数值");
                 return MFTSCAN_ERROR_INVALID_ARGUMENT;
             }
+            if (has_format) {
+                mftscan_set_error_detail("不能重复提供 --format");
+                return MFTSCAN_ERROR_INVALID_ARGUMENT;
+            }
             format_text = argv[++index];
             if (_wcsicmp(format_text, L"table") == 0) {
                 options->format = MFTSCAN_FORMAT_TABLE;
@@ -810,6 +819,7 @@ MftscanError mftscan_parse_options(int argc, wchar_t **argv, MftscanOptions *opt
                 mftscan_set_error_detail("--format 只能是 table 或 json");
                 return MFTSCAN_ERROR_INVALID_ARGUMENT;
             }
+            has_format = true;
         } else if (_wcsicmp(argument, L"--limit") == 0) {
             uint64_t parsed_limit = 0;
 
@@ -823,6 +833,14 @@ MftscanError mftscan_parse_options(int argc, wchar_t **argv, MftscanOptions *opt
             }
             options->limit = (size_t)parsed_limit;
             options->has_limit = true;
+        } else if (_wcsicmp(argument, L"--all") == 0) {
+            if (has_all) {
+                mftscan_set_error_detail("不能重复提供 --all");
+                return MFTSCAN_ERROR_INVALID_ARGUMENT;
+            }
+            options->output_all = true;
+            options->format = MFTSCAN_FORMAT_JSON;
+            has_all = true;
         } else {
             mftscan_set_error_detail("无法识别的参数: 请检查 %ls", argument);
             return MFTSCAN_ERROR_INVALID_ARGUMENT;
@@ -831,6 +849,11 @@ MftscanError mftscan_parse_options(int argc, wchar_t **argv, MftscanOptions *opt
 
     if (!has_location || !has_sort) {
         mftscan_set_error_detail("必须同时提供 --location 和 --sort");
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (options->output_all && has_format) {
+        mftscan_set_error_detail("--all 固定输出 JSON，不接受 --format");
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
     }
 

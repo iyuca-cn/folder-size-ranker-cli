@@ -2,25 +2,36 @@
 
 `folder-size-ranker-cli` 是一个 Windows 命令行工具，用 C 语言实现，用于统计文件夹大小。NTFS 卷会直接读取 MFT，其他文件系统会降级为平台系统 API 扫描。
 
-它的目标是做类似 WizTree 的快速统计，但当前第一版只输出“没有子文件夹的文件夹”，也就是叶子目录，并按大小从大到小排序。
+它的目标是做类似 WizTree 的快速统计。默认输出“没有子文件夹的文件夹”，也就是叶子目录，并按大小从大到小排序；指定 `--all` 时会输出指定位置下所有层级目录的 JSON 树。
 
 ## 作用
 
 - NTFS 卷直接读取目标所在盘符的 MFT，不递归遍历目录。
 - 非 NTFS 卷使用 Win32 平台 API 降级扫描，通过显式栈迭代遍历目录树，不使用递归函数。
 - 统计叶子目录的文件大小。
+- 支持输出指定位置下所有层级目录的紧凑 JSON 树。
 - 支持按逻辑大小或分配大小排序。
 - 支持设置最小输出大小。
 - 支持表格输出和 JSON 输出。
 
 ## 统计口径
 
-本工具当前只输出叶子目录：
+默认模式只输出叶子目录：
 
 - 叶子目录：目录下面没有任何子文件夹。
 - 非叶子目录：目录下面还有子文件夹，不会出现在输出结果里。
 - 目录大小：该叶子目录直属文件的大小总和。
 - 硬链接：按文件 MFT 记录去重，同一个文件实体只统计一次。
+
+指定 `--all` 时：
+
+- 输出根节点为 `--location` 指定的目录或盘符根目录。
+- `children` 包含直接子目录，子目录下继续递归包含更深层目录。
+- 每个目录的 `bytes` 是该目录自身及所有后代目录中文件大小的递归汇总。
+- 每一层 `children` 都按 `bytes` 从大到小排序。
+- `--min-size` 会过滤每层中小于指定大小的子目录；根节点始终输出。
+- `--limit` 表示每层最多输出多少个直接子目录。
+- `--all` 固定输出紧凑 JSON，不接受 `--format`。
 
 输出结果始终只有一个大小字段：
 
@@ -66,6 +77,7 @@ Release 配置显式静态链接 CRT，因此发版产物保持为单个 exe 文
 
 ```text
 folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> [--min-size expr] [--format <table|json>] [--limit N]
+folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> --all [--min-size expr] [--limit N]
 ```
 
 参数说明：
@@ -77,6 +89,7 @@ folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> [--min-s
 | `--min-size <expr>` | 否 | `0` | 只输出大小大于等于该值的目录，支持表达式 |
 | `--format <table|json>` | 否 | `table` | 输出表格或 JSON |
 | `--limit <N>` | 否 | 不限制 | 只输出前 N 条 |
+| `--all` | 否 | 关闭 | 输出所有层级目录的紧凑 JSON 树 |
 | `--help` | 否 | 无 | 显示帮助 |
 
 说明：
@@ -84,6 +97,8 @@ folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> [--min-s
 - `--location` 指向 NTFS 子目录时，程序仍会扫描整卷 MFT，再只输出该目录子树内的叶子目录。
 - `--location` 指向非 NTFS 子目录时，程序仍走平台 API 降级路径，并在输出阶段按该目录子树过滤。
 - `--volume` 已废弃，不再支持。
+- `--all` 与 `--format` 互斥；指定 `--all` 时输出固定为紧凑 JSON。
+- 默认模式下 `--limit` 表示输出前 N 条；`--all` 模式下 `--limit` 表示每层最多输出 N 个直接子目录。
 
 `--min-size` 使用的字段和 `--sort` 一致：
 
@@ -140,6 +155,12 @@ folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> [--min-s
 .\x64\Release\folder-size-ranker-cli.exe --location C:\Windows --sort allocated --format table --limit 20
 ```
 
+输出 `C:\Users` 下所有层级目录的紧凑 JSON 树，每层最多 10 个直接子目录：
+
+```powershell
+.\x64\Release\folder-size-ranker-cli.exe --location C:\Users --sort allocated --all --min-size 104857600 --limit 10
+```
+
 ## 表格输出
 
 表格输出包含两列：
@@ -177,6 +198,20 @@ JSON 输出为 UTF-8，结构如下：
 - `min_size`：最小大小过滤值。
 - `total_leaf_dirs`：输出结果条数。
 - `items`：已经按指定字段降序排序的叶子目录列表，每项只包含 `bytes` 和 `path`。
+
+## `--all` JSON 输出
+
+`--all` 输出为紧凑 JSON，结构如下：
+
+```json
+{"path":"C:\\Users","bytes":123469824,"children":[{"path":"C:\\Users\\Alice","bytes":123469824,"children":[]}]}
+```
+
+字段说明：
+
+- `path`：当前目录路径。
+- `bytes`：当前目录自身及所有后代目录中文件大小的递归汇总，字段含义由 `--sort` 决定。
+- `children`：当前目录的直接子目录，已按 `bytes` 降序排序，并递归包含更深层目录。
 
 ## 注意事项
 

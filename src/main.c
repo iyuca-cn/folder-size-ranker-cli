@@ -41,11 +41,13 @@ int wmain(int argc, wchar_t **argv) {
     mftscan_context_init(&context);
 
     error_code = mftscan_scan_volume(&context, &options);
-    if (error_code == MFTSCAN_OK) {
+    if (error_code == MFTSCAN_OK && !options.output_all) {
         error_code = mftscan_build_results(&context, &options, &scan_result);
     }
     if (error_code == MFTSCAN_OK) {
-        error_code = (options.format == MFTSCAN_FORMAT_JSON)
+        error_code = options.output_all
+            ? mftscan_output_all_json(&options, &context)
+            : (options.format == MFTSCAN_FORMAT_JSON)
             ? mftscan_output_json(&options, &scan_result)
             : mftscan_output_table(&options, &scan_result);
     }

@@ -40,6 +40,7 @@ typedef struct MftscanOptions {
     size_t limit;
     bool has_limit;
     bool filter_by_location;
+    bool output_all;
 } MftscanOptions;
 
 typedef struct MftscanLeafResult {
@@ -69,6 +70,7 @@ MftscanError mftscan_build_results(const MftscanContext *context, const MftscanO
 void mftscan_free_results(MftscanScanResult *scan_result);
 MftscanError mftscan_output_table(const MftscanOptions *options, const MftscanScanResult *scan_result);
 MftscanError mftscan_output_json(const MftscanOptions *options, const MftscanScanResult *scan_result);
+MftscanError mftscan_output_all_json(const MftscanOptions *options, const MftscanContext *context);
 char *mftscan_utf8_from_wide(const wchar_t *wide_text);
 wchar_t *mftscan_strdup_w(const wchar_t *source_text);
 
