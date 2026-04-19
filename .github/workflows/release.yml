@@ -46,7 +46,7 @@ jobs:
           }
 
           $remoteTagRef = "refs/tags/$env:GITHUB_REF_NAME"
-          $localTagRef = 'refs/tags/__release_tag__'
+          $localTagRef = 'refs/codex/release_tag'
           git update-ref -d $localTagRef 2>$null
           & $gitPath fetch --force origin "+$remoteTagRef:$localTagRef"
           if ($LASTEXITCODE -ne 0) {
