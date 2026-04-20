@@ -9,6 +9,7 @@
 #define MFTSCAN_FILE_RECORD_SIGNATURE 0x454c4946UL
 #define MFTSCAN_ATTRIBUTE_END 0xffffffffUL
 #define MFTSCAN_ATTRIBUTE_FILE_NAME 0x30UL
+#define MFTSCAN_ATTRIBUTE_DATA 0x80UL
 
 #pragma pack(push, 1)
 typedef struct MftscanNtfsFileRecordHeader {
@@ -45,6 +46,18 @@ typedef struct MftscanNtfsResidentAttributeHeader {
     BYTE resident_flags;
     BYTE reserved;
 } MftscanNtfsResidentAttributeHeader;
+
+typedef struct MftscanNtfsNonResidentAttributeHeader {
+    MftscanNtfsAttributeHeader header;
+    ULONGLONG lowest_vcn;
+    ULONGLONG highest_vcn;
+    WORD mapping_pairs_offset;
+    BYTE compression_unit;
+    BYTE reserved[5];
+    ULONGLONG allocated_size;
+    ULONGLONG data_size;
+    ULONGLONG initialized_size;
+} MftscanNtfsNonResidentAttributeHeader;
 
 typedef struct MftscanNtfsFileNameAttribute {
     ULONGLONG parent_directory;
@@ -133,6 +146,15 @@ static MftscanError mftscan_capture_file_name(
         return MFTSCAN_ERROR_MFT_PARSE;
     }
 
+    if (!is_directory && !record_info->has_data_size) {
+        if (file_name_attribute->real_size > record_info->logical_size) {
+            record_info->logical_size = file_name_attribute->real_size;
+        }
+        if (file_name_attribute->allocated_size > record_info->allocated_size) {
+            record_info->allocated_size = file_name_attribute->allocated_size;
+        }
+    }
+
     candidate_priority = mftscan_name_priority(file_name_attribute->file_name_type);
     if (candidate_priority < record_info->name_priority) {
         return MFTSCAN_OK;
@@ -150,9 +172,79 @@ static MftscanError mftscan_capture_file_name(
     record_info->name = candidate_name;
     record_info->name_priority = candidate_priority;
     record_info->parent_frn = file_name_attribute->parent_directory & MFTSCAN_FRN_MASK;
-    record_info->logical_size = is_directory ? 0ULL : file_name_attribute->real_size;
-    record_info->allocated_size = is_directory ? 0ULL : file_name_attribute->allocated_size;
     return MFTSCAN_OK;
+}
+
+static bool mftscan_attribute_name_is_valid(
+    const MftscanNtfsAttributeHeader *attribute_header,
+    size_t attribute_length) {
+    size_t name_size_bytes = 0;
+
+    if (attribute_header == NULL) {
+        return false;
+    }
+
+    if (attribute_header->name_length == 0U) {
+        return true;
+    }
+
+    name_size_bytes = (size_t)attribute_header->name_length * sizeof(WCHAR);
+    return attribute_header->name_offset >= sizeof(MftscanNtfsAttributeHeader) &&
+        attribute_header->name_offset + name_size_bytes <= attribute_length;
+}
+
+static MftscanError mftscan_capture_data_size(
+    const MftscanNtfsAttributeHeader *attribute_header,
+    size_t attribute_length,
+    MftscanRecordInfo *record_info) {
+    if (attribute_header == NULL || record_info == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (record_info->is_directory) {
+        return MFTSCAN_OK;
+    }
+
+    if (!mftscan_attribute_name_is_valid(attribute_header, attribute_length)) {
+        return MFTSCAN_ERROR_MFT_PARSE;
+    }
+
+    if (attribute_header->name_length != 0U) {
+        return MFTSCAN_OK;
+    }
+
+    if (attribute_header->non_resident == 0U) {
+        const MftscanNtfsResidentAttributeHeader *resident_header =
+            (const MftscanNtfsResidentAttributeHeader *)attribute_header;
+
+        if (sizeof(MftscanNtfsResidentAttributeHeader) > attribute_length ||
+            resident_header->value_offset + resident_header->value_length > attribute_length) {
+            return MFTSCAN_ERROR_MFT_PARSE;
+        }
+
+        record_info->logical_size = resident_header->value_length;
+        record_info->allocated_size = resident_header->value_length;
+        record_info->has_data_size = true;
+        return MFTSCAN_OK;
+    }
+
+    {
+        const MftscanNtfsNonResidentAttributeHeader *non_resident_header =
+            (const MftscanNtfsNonResidentAttributeHeader *)attribute_header;
+
+        if (sizeof(MftscanNtfsNonResidentAttributeHeader) > attribute_length) {
+            return MFTSCAN_ERROR_MFT_PARSE;
+        }
+
+        if (non_resident_header->lowest_vcn != 0ULL) {
+            return MFTSCAN_OK;
+        }
+
+        record_info->logical_size = non_resident_header->data_size;
+        record_info->allocated_size = non_resident_header->allocated_size;
+        record_info->has_data_size = true;
+        return MFTSCAN_OK;
+    }
 }
 
 MftscanError mftscan_parse_file_record(
@@ -206,11 +298,19 @@ MftscanError mftscan_parse_file_record(
             return MFTSCAN_ERROR_MFT_PARSE;
         }
 
-        if (attribute_header->type == MFTSCAN_ATTRIBUTE_FILE_NAME && attribute_header->non_resident == 0) {
+        if (attribute_header->type == MFTSCAN_ATTRIBUTE_FILE_NAME && attribute_header->non_resident == 0U) {
             error_code = mftscan_capture_file_name(
                 (const MftscanNtfsResidentAttributeHeader *)attribute_header,
                 attribute_header->length,
                 record_info->is_directory,
+                record_info);
+            if (error_code != MFTSCAN_OK) {
+                return error_code;
+            }
+        } else if (attribute_header->type == MFTSCAN_ATTRIBUTE_DATA) {
+            error_code = mftscan_capture_data_size(
+                attribute_header,
+                attribute_header->length,
                 record_info);
             if (error_code != MFTSCAN_OK) {
                 return error_code;

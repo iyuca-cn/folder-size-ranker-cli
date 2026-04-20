@@ -64,6 +64,7 @@ typedef struct MftscanRecordInfo {
     uint64_t allocated_size;
     wchar_t *name;
     uint8_t name_priority;
+    bool has_data_size;
     bool in_use;
     bool is_directory;
 } MftscanRecordInfo;
