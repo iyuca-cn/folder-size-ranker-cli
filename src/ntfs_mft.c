@@ -36,7 +36,7 @@ MftscanError mftscan_scan_volume_ntfs(MftscanContext *context, const MftscanOpti
     }
 
     request_record = volume_handle.highest_record_number;
-    while (request_record >= 1ULL) {
+    for (;;) {
         MftscanRecordInfo record_info;
         uint64_t actual_record = 0;
         size_t file_record_length = 0;
@@ -89,7 +89,7 @@ MftscanError mftscan_scan_volume_ntfs(MftscanContext *context, const MftscanOpti
         }
 
         mftscan_free_record_info(&record_info);
-        if (actual_record <= 1ULL) {
+        if (actual_record == 0ULL) {
             break;
         }
         request_record = actual_record - 1ULL;
