@@ -25,11 +25,13 @@
 
 指定 `--all` 时：
 
-- 输出根节点为 `--location` 指定的目录或盘符根目录。
+- 根对象的 `root_path` 是 `--location` 指定的目录或盘符根目录完整路径。
+- 子目录和文件节点只输出 `name`，不重复输出完整路径。
 - `files` 包含当前目录下的直接文件。
 - `children` 包含直接子目录，子目录下继续递归包含更深层目录。
 - 每个目录的 `bytes` 是该目录自身及所有后代目录中文件大小的递归汇总。
 - 每个文件的 `bytes` 是该文件自身大小。
+- 文件完整路径可由 `root_path`、祖先目录 `name` 链和文件 `name` 拼接得到。
 - 每一层 `files` 都按 `bytes` 从大到小排序。
 - 每一层 `children` 都按 `bytes` 从大到小排序。
 - `--min-size` 会过滤每层中小于指定大小的文件和子目录；根节点始终输出。
@@ -207,15 +209,18 @@ JSON 输出为 UTF-8，结构如下：
 `--all` 输出为紧凑 JSON，结构如下：
 
 ```json
-{"path":"C:\\Users","bytes":123469824,"files":[{"path":"C:\\Users\\desktop.ini","bytes":174}],"children":[{"path":"C:\\Users\\Alice","bytes":123469824,"files":[],"children":[]}]}
+{"root_path":"C:\\Users","bytes":123469824,"files":[{"name":"desktop.ini","bytes":174}],"children":[{"name":"Alice","bytes":123469824,"files":[],"children":[]}]}
 ```
 
 字段说明：
 
-- `path`：当前目录路径。
+- `root_path`：根对象的完整路径，只在根对象输出一次。
+- `name`：子目录或文件在父目录下的名称，不包含父级路径。
 - `bytes`：目录节点表示当前目录自身及所有后代目录中文件大小的递归汇总；文件节点表示单文件大小，字段含义都由 `--sort` 决定。
 - `files`：当前目录的直接文件，已按 `bytes` 降序排序。
 - `children`：当前目录的直接子目录，已按 `bytes` 降序排序，并递归包含更深层目录。
+
+完整路径恢复规则：从 `root_path` 开始，依次拼接祖先目录的 `name`，最后拼接当前文件或目录的 `name`。
 
 ## 注意事项
 

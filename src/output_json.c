@@ -387,64 +387,28 @@ static MftscanError mftscan_all_sort_children(
     return MFTSCAN_OK;
 }
 
-static wchar_t *mftscan_all_join_path(const wchar_t *parent_path, const wchar_t *child_name) {
-    size_t parent_length = 0;
-    size_t child_length = 0;
-    bool needs_separator = false;
-    size_t total_length = 0;
-    wchar_t *joined_path = NULL;
+static MftscanError mftscan_all_add_wide_string(
+    yyjson_mut_doc *document,
+    yyjson_mut_val *object,
+    const char *key,
+    const wchar_t *value) {
+    char *value_utf8 = NULL;
 
-    if (parent_path == NULL || child_name == NULL) {
-        return NULL;
-    }
-
-    parent_length = wcslen(parent_path);
-    child_length = wcslen(child_name);
-    needs_separator = parent_length > 0U && parent_path[parent_length - 1U] != L'\\';
-    total_length = parent_length + child_length + (needs_separator ? 1U : 0U);
-    joined_path = (wchar_t *)calloc(total_length + 1U, sizeof(wchar_t));
-    if (joined_path == NULL) {
-        return NULL;
-    }
-
-    memcpy(joined_path, parent_path, parent_length * sizeof(wchar_t));
-    if (needs_separator) {
-        joined_path[parent_length++] = L'\\';
-    }
-    memcpy(joined_path + parent_length, child_name, child_length * sizeof(wchar_t));
-    joined_path[total_length] = L'\0';
-    return joined_path;
-}
-
-static MftscanError mftscan_all_build_file_path(
-    const MftscanContext *context,
-    const MftscanFileNode *file_node,
-    wchar_t **path_text) {
-    wchar_t *parent_path = NULL;
-    wchar_t *file_path = NULL;
-    MftscanError error_code = MFTSCAN_OK;
-
-    if (context == NULL || file_node == NULL || path_text == NULL) {
+    if (document == NULL || object == NULL || key == NULL || value == NULL) {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
     }
 
-    *path_text = NULL;
-    if (file_node->name == NULL || file_node->name[0] == L'\0') {
-        return MFTSCAN_ERROR_INVALID_ARGUMENT;
-    }
-
-    error_code = mftscan_build_path(context, file_node->parent_frn, &parent_path);
-    if (error_code != MFTSCAN_OK) {
-        return error_code;
-    }
-
-    file_path = mftscan_all_join_path(parent_path, file_node->name);
-    free(parent_path);
-    if (file_path == NULL) {
+    value_utf8 = mftscan_utf8_from_wide(value);
+    if (value_utf8 == NULL) {
         return MFTSCAN_ERROR_OUT_OF_MEMORY;
     }
 
-    *path_text = file_path;
+    if (!yyjson_mut_obj_add_strcpy(document, object, key, value_utf8)) {
+        free(value_utf8);
+        return MFTSCAN_ERROR_JSON;
+    }
+
+    free(value_utf8);
     return MFTSCAN_OK;
 }
 
@@ -457,13 +421,12 @@ static MftscanError mftscan_all_add_json_node(
     size_t directory_index) {
     yyjson_mut_val *files_array = NULL;
     yyjson_mut_val *children_array = NULL;
-    wchar_t *path_text = NULL;
-    char *path_utf8 = NULL;
     size_t file_position = 0;
     size_t child_position = 0;
     size_t emitted_file_count = 0;
     size_t emitted_count = 0;
     MftscanError error_code = MFTSCAN_OK;
+    const MftscanDirNode *directory_node = NULL;
 
     if (document == NULL || node_object == NULL || context == NULL || options == NULL || tree == NULL) {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
@@ -475,25 +438,36 @@ static MftscanError mftscan_all_add_json_node(
         return MFTSCAN_ERROR_JSON;
     }
 
-    error_code = mftscan_build_path(context, context->directories.items[directory_index].frn, &path_text);
-    if (error_code != MFTSCAN_OK) {
-        return error_code;
+    directory_node = &context->directories.items[directory_index];
+    if (directory_index == tree->root_index) {
+        wchar_t *root_path = NULL;
+
+        error_code = mftscan_build_path(context, directory_node->frn, &root_path);
+        if (error_code != MFTSCAN_OK) {
+            return error_code;
+        }
+
+        error_code = mftscan_all_add_wide_string(document, node_object, "root_path", root_path);
+        free(root_path);
+        if (error_code != MFTSCAN_OK) {
+            return error_code;
+        }
+    } else {
+        if (directory_node->name == NULL || directory_node->name[0] == L'\0') {
+            return MFTSCAN_ERROR_INTERNAL;
+        }
+
+        error_code = mftscan_all_add_wide_string(document, node_object, "name", directory_node->name);
+        if (error_code != MFTSCAN_OK) {
+            return error_code;
+        }
     }
 
-    path_utf8 = mftscan_utf8_from_wide(path_text);
-    free(path_text);
-    if (path_utf8 == NULL) {
-        return MFTSCAN_ERROR_OUT_OF_MEMORY;
-    }
-
-    if (!yyjson_mut_obj_add_strcpy(document, node_object, "path", path_utf8) ||
-        !yyjson_mut_obj_add_uint(document, node_object, "bytes", mftscan_all_sort_value(options, tree, directory_index)) ||
+    if (!yyjson_mut_obj_add_uint(document, node_object, "bytes", mftscan_all_sort_value(options, tree, directory_index)) ||
         !yyjson_mut_obj_add_val(document, node_object, "files", files_array) ||
         !yyjson_mut_obj_add_val(document, node_object, "children", children_array)) {
-        free(path_utf8);
         return MFTSCAN_ERROR_JSON;
     }
-    free(path_utf8);
 
     for (file_position = tree->file_offsets[directory_index];
          file_position < tree->file_offsets[directory_index + 1U];
@@ -502,8 +476,6 @@ static MftscanError mftscan_all_add_json_node(
         const MftscanFileNode *file_node = &context->files.items[file_index];
         uint64_t file_size = mftscan_all_file_sort_value(options, file_node);
         yyjson_mut_val *file_object = NULL;
-        wchar_t *file_path = NULL;
-        char *file_path_utf8 = NULL;
 
         if (file_size < options->min_size) {
             break;
@@ -511,31 +483,24 @@ static MftscanError mftscan_all_add_json_node(
         if (options->has_limit && emitted_file_count >= options->limit) {
             break;
         }
-
-        error_code = mftscan_all_build_file_path(context, file_node, &file_path);
-        if (error_code != MFTSCAN_OK) {
-            return error_code;
-        }
-
-        file_path_utf8 = mftscan_utf8_from_wide(file_path);
-        free(file_path);
-        if (file_path_utf8 == NULL) {
-            return MFTSCAN_ERROR_OUT_OF_MEMORY;
+        if (file_node->name == NULL || file_node->name[0] == L'\0') {
+            return MFTSCAN_ERROR_INTERNAL;
         }
 
         file_object = yyjson_mut_arr_add_obj(document, files_array);
         if (file_object == NULL) {
-            free(file_path_utf8);
             return MFTSCAN_ERROR_JSON;
         }
 
-        if (!yyjson_mut_obj_add_strcpy(document, file_object, "path", file_path_utf8) ||
-            !yyjson_mut_obj_add_uint(document, file_object, "bytes", file_size)) {
-            free(file_path_utf8);
+        error_code = mftscan_all_add_wide_string(document, file_object, "name", file_node->name);
+        if (error_code != MFTSCAN_OK) {
+            return error_code;
+        }
+
+        if (!yyjson_mut_obj_add_uint(document, file_object, "bytes", file_size)) {
             return MFTSCAN_ERROR_JSON;
         }
 
-        free(file_path_utf8);
         emitted_file_count += 1U;
     }
 
