@@ -174,6 +174,9 @@ MftscanError mftscan_ingest_record(MftscanContext *context, MftscanRecordInfo *r
             record_info->name = NULL;
         }
 
+        directory_node->logical_size += record_info->logical_size;
+        directory_node->allocated_size += record_info->allocated_size;
+
         if (record_info->parent_frn != 0ULL && record_info->parent_frn != record_info->frn) {
             MftscanDirNode *parent_node = NULL;
             error_code = mftscan_ensure_directory(context, record_info->parent_frn, &parent_node);

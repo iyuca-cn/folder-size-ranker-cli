@@ -67,6 +67,7 @@ typedef struct MftscanRecordInfo {
     bool has_data_size;
     bool in_use;
     bool is_directory;
+    bool is_system;
 } MftscanRecordInfo;
 
 typedef struct MftscanVolumeHandle {

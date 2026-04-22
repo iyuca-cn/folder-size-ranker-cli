@@ -12,8 +12,8 @@
 #define MFTSCAN_ATTRIBUTE_ATTRIBUTE_LIST 0x20UL
 #define MFTSCAN_ATTRIBUTE_FILE_NAME 0x30UL
 #define MFTSCAN_ATTRIBUTE_DATA 0x80UL
-
-#define MFTSCAN_MAX_ATTRIBUTE_LIST_DEPTH 64U
+#define MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION 0xa0UL
+#define MFTSCAN_ATTRIBUTE_BITMAP 0xb0UL
 
 #pragma pack(push, 1)
 typedef struct MftscanNtfsFileRecordHeader {
@@ -99,6 +99,8 @@ typedef struct MftscanNtfsDataSizeCandidate {
 typedef struct MftscanNtfsParseState {
     MftscanNtfsDataSizeCandidate file_name_size;
     MftscanNtfsDataSizeCandidate direct_data_size;
+    MftscanNtfsDataSizeCandidate fallback_stream_size;
+    MftscanNtfsDataSizeCandidate directory_self_size;
     uint8_t *attribute_list_data;
     size_t attribute_list_length;
     bool has_attribute_list;
@@ -139,6 +141,45 @@ static void mftscan_set_data_size_candidate(
     candidate->logical_size = logical_size;
     candidate->allocated_size = allocated_size;
     candidate->present = true;
+}
+
+static bool mftscan_add_data_size_candidate(
+    MftscanNtfsDataSizeCandidate *candidate,
+    const MftscanNtfsDataSizeCandidate *addition) {
+    if (candidate == NULL || addition == NULL || !addition->present) {
+        return true;
+    }
+    if (candidate->logical_size > UINT64_MAX - addition->logical_size ||
+        candidate->allocated_size > UINT64_MAX - addition->allocated_size) {
+        return false;
+    }
+
+    candidate->logical_size += addition->logical_size;
+    candidate->allocated_size += addition->allocated_size;
+    candidate->present = true;
+    return true;
+}
+
+static bool mftscan_is_system_file_fallback_attribute(const MftscanNtfsAttributeHeader *attribute_header) {
+    if (attribute_header == NULL) {
+        return false;
+    }
+
+    if (attribute_header->type == MFTSCAN_ATTRIBUTE_DATA) {
+        return attribute_header->name_length != 0U;
+    }
+
+    return attribute_header->type == MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION ||
+        attribute_header->type == MFTSCAN_ATTRIBUTE_BITMAP;
+}
+
+static bool mftscan_is_system_directory_self_attribute(const MftscanNtfsAttributeHeader *attribute_header) {
+    if (attribute_header == NULL) {
+        return false;
+    }
+
+    return attribute_header->type == MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION ||
+        attribute_header->type == MFTSCAN_ATTRIBUTE_BITMAP;
 }
 
 static MftscanError mftscan_apply_update_sequence_array(uint8_t *record_buffer, size_t record_length, uint32_t bytes_per_sector) {
@@ -238,6 +279,9 @@ static MftscanError mftscan_capture_file_name(
         }
         file_name_size->present = true;
     }
+    if ((file_name_attribute->file_attributes & FILE_ATTRIBUTE_SYSTEM) != 0U) {
+        record_info->is_system = true;
+    }
 
     candidate_priority = mftscan_name_priority(file_name_attribute->file_name_type);
     if (candidate_priority < record_info->name_priority) {
@@ -259,7 +303,81 @@ static MftscanError mftscan_capture_file_name(
     return MFTSCAN_OK;
 }
 
+static uint64_t mftscan_read_unsigned_le(const uint8_t *bytes, size_t byte_count);
+static int64_t mftscan_read_signed_le(const uint8_t *bytes, size_t byte_count);
+
+static MftscanError mftscan_calculate_nonresident_allocated_size(
+    const MftscanVolumeHandle *volume_handle,
+    const MftscanNtfsNonResidentAttributeHeader *non_resident_header,
+    size_t attribute_length,
+    uint64_t *allocated_size) {
+    const uint8_t *mapping_pair = NULL;
+    const uint8_t *mapping_end = NULL;
+    int64_t current_lcn = 0;
+    bool saw_terminator = false;
+
+    if (volume_handle == NULL || non_resident_header == NULL || allocated_size == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (volume_handle->bytes_per_cluster == 0U ||
+        sizeof(MftscanNtfsNonResidentAttributeHeader) > attribute_length ||
+        non_resident_header->mapping_pairs_offset >= attribute_length) {
+        return MFTSCAN_ERROR_MFT_PARSE;
+    }
+
+    *allocated_size = 0ULL;
+    mapping_pair = (const uint8_t *)non_resident_header + non_resident_header->mapping_pairs_offset;
+    mapping_end = (const uint8_t *)non_resident_header + attribute_length;
+    while (mapping_pair < mapping_end) {
+        BYTE run_header = *mapping_pair++;
+        size_t length_size = 0;
+        size_t offset_size = 0;
+        uint64_t cluster_count = 0ULL;
+
+        if (run_header == 0U) {
+            saw_terminator = true;
+            break;
+        }
+
+        length_size = run_header & 0x0FU;
+        offset_size = run_header >> 4U;
+        if (length_size == 0U || mapping_pair + length_size + offset_size > mapping_end) {
+            return MFTSCAN_ERROR_MFT_PARSE;
+        }
+
+        cluster_count = mftscan_read_unsigned_le(mapping_pair, length_size);
+        mapping_pair += length_size;
+        if (cluster_count == 0ULL) {
+            return MFTSCAN_ERROR_MFT_PARSE;
+        }
+
+        if (offset_size != 0U) {
+            int64_t lcn_delta = mftscan_read_signed_le(mapping_pair, offset_size);
+            uint64_t run_allocated_size = 0ULL;
+
+            current_lcn += lcn_delta;
+            if (current_lcn < 0) {
+                return MFTSCAN_ERROR_MFT_PARSE;
+            }
+
+            if (cluster_count > UINT64_MAX / volume_handle->bytes_per_cluster) {
+                return MFTSCAN_ERROR_MFT_PARSE;
+            }
+            run_allocated_size = cluster_count * volume_handle->bytes_per_cluster;
+            if (*allocated_size > UINT64_MAX - run_allocated_size) {
+                return MFTSCAN_ERROR_MFT_PARSE;
+            }
+            *allocated_size += run_allocated_size;
+        }
+        mapping_pair += offset_size;
+    }
+
+    return saw_terminator ? MFTSCAN_OK : MFTSCAN_ERROR_MFT_PARSE;
+}
+
 static MftscanError mftscan_capture_data_size_candidate(
+    const MftscanVolumeHandle *volume_handle,
     const MftscanNtfsAttributeHeader *attribute_header,
     size_t attribute_length,
     MftscanNtfsDataSizeCandidate *candidate) {
@@ -291,8 +409,10 @@ static MftscanError mftscan_capture_data_size_candidate(
     {
         const MftscanNtfsNonResidentAttributeHeader *non_resident_header =
             (const MftscanNtfsNonResidentAttributeHeader *)attribute_header;
+        uint64_t allocated_size = 0ULL;
+        MftscanError error_code = MFTSCAN_OK;
 
-        if (sizeof(MftscanNtfsNonResidentAttributeHeader) > attribute_length) {
+        if (volume_handle == NULL || sizeof(MftscanNtfsNonResidentAttributeHeader) > attribute_length) {
             return MFTSCAN_ERROR_MFT_PARSE;
         }
 
@@ -300,7 +420,124 @@ static MftscanError mftscan_capture_data_size_candidate(
             return MFTSCAN_OK;
         }
 
-        mftscan_set_data_size_candidate(candidate, non_resident_header->data_size, non_resident_header->allocated_size);
+        error_code = mftscan_calculate_nonresident_allocated_size(
+            volume_handle,
+            non_resident_header,
+            attribute_length,
+            &allocated_size);
+        if (error_code != MFTSCAN_OK) {
+            return error_code;
+        }
+
+        mftscan_set_data_size_candidate(candidate, non_resident_header->data_size, allocated_size);
+        return MFTSCAN_OK;
+    }
+}
+
+static MftscanError mftscan_capture_data_size_fragment(
+    const MftscanVolumeHandle *volume_handle,
+    const MftscanNtfsAttributeHeader *attribute_header,
+    size_t attribute_length,
+    MftscanNtfsDataSizeCandidate *candidate) {
+    if (attribute_header == NULL || candidate == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (!mftscan_attribute_name_is_valid(attribute_header, attribute_length)) {
+        return MFTSCAN_ERROR_MFT_PARSE;
+    }
+
+    if (attribute_header->name_length != 0U) {
+        return MFTSCAN_OK;
+    }
+
+    if (attribute_header->non_resident == 0U) {
+        return mftscan_capture_data_size_candidate(volume_handle, attribute_header, attribute_length, candidate);
+    }
+
+    {
+        const MftscanNtfsNonResidentAttributeHeader *non_resident_header =
+            (const MftscanNtfsNonResidentAttributeHeader *)attribute_header;
+        uint64_t allocated_size = 0ULL;
+        uint64_t logical_size = 0ULL;
+        MftscanError error_code = MFTSCAN_OK;
+
+        if (volume_handle == NULL || sizeof(MftscanNtfsNonResidentAttributeHeader) > attribute_length) {
+            return MFTSCAN_ERROR_MFT_PARSE;
+        }
+
+        error_code = mftscan_calculate_nonresident_allocated_size(
+            volume_handle,
+            non_resident_header,
+            attribute_length,
+            &allocated_size);
+        if (error_code != MFTSCAN_OK) {
+            return error_code;
+        }
+
+        if (non_resident_header->lowest_vcn == 0ULL) {
+            logical_size = non_resident_header->data_size;
+        }
+        mftscan_set_data_size_candidate(candidate, logical_size, allocated_size);
+        return MFTSCAN_OK;
+    }
+}
+
+static MftscanError mftscan_capture_storage_size_fragment(
+    const MftscanVolumeHandle *volume_handle,
+    const MftscanNtfsAttributeHeader *attribute_header,
+    size_t attribute_length,
+    bool require_unnamed,
+    MftscanNtfsDataSizeCandidate *candidate) {
+    if (attribute_header == NULL || candidate == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (!mftscan_attribute_name_is_valid(attribute_header, attribute_length)) {
+        return MFTSCAN_ERROR_MFT_PARSE;
+    }
+
+    if (require_unnamed && attribute_header->name_length != 0U) {
+        return MFTSCAN_OK;
+    }
+
+    if (attribute_header->non_resident == 0U) {
+        const MftscanNtfsResidentAttributeHeader *resident_header =
+            (const MftscanNtfsResidentAttributeHeader *)attribute_header;
+
+        if (sizeof(MftscanNtfsResidentAttributeHeader) > attribute_length ||
+            resident_header->value_offset + resident_header->value_length > attribute_length) {
+            return MFTSCAN_ERROR_MFT_PARSE;
+        }
+
+        mftscan_set_data_size_candidate(candidate, resident_header->value_length, 0ULL);
+        return MFTSCAN_OK;
+    }
+
+    {
+        const MftscanNtfsNonResidentAttributeHeader *non_resident_header =
+            (const MftscanNtfsNonResidentAttributeHeader *)attribute_header;
+        uint64_t allocated_size = 0ULL;
+        uint64_t logical_size = 0ULL;
+        MftscanError error_code = MFTSCAN_OK;
+
+        if (volume_handle == NULL || sizeof(MftscanNtfsNonResidentAttributeHeader) > attribute_length) {
+            return MFTSCAN_ERROR_MFT_PARSE;
+        }
+
+        error_code = mftscan_calculate_nonresident_allocated_size(
+            volume_handle,
+            non_resident_header,
+            attribute_length,
+            &allocated_size);
+        if (error_code != MFTSCAN_OK) {
+            return error_code;
+        }
+
+        if (non_resident_header->lowest_vcn == 0ULL) {
+            logical_size = non_resident_header->data_size;
+        }
+        mftscan_set_data_size_candidate(candidate, logical_size, allocated_size);
         return MFTSCAN_OK;
     }
 }
@@ -592,11 +829,13 @@ static bool mftscan_bytes_are_zero(const uint8_t *bytes, size_t byte_count) {
     return true;
 }
 
-static MftscanError mftscan_find_data_size_in_record(
+static MftscanError mftscan_find_attribute_size_in_record(
     const MftscanVolumeHandle *volume_handle,
     uint64_t segment_frn,
     uint64_t base_record_frn,
+    uint32_t attribute_type,
     uint16_t attribute_number,
+    bool require_unnamed,
     MftscanNtfsDataSizeCandidate *data_size) {
     NTFS_FILE_RECORD_OUTPUT_BUFFER *output_buffer = NULL;
     MftscanNtfsFileRecordHeader *header = NULL;
@@ -686,9 +925,14 @@ static MftscanError mftscan_find_data_size_in_record(
             goto cleanup;
         }
 
-        if (attribute_header->type == MFTSCAN_ATTRIBUTE_DATA &&
+        if (attribute_header->type == attribute_type &&
             attribute_header->attribute_number == attribute_number) {
-            error_code = mftscan_capture_data_size_candidate(attribute_header, attribute_header->length, data_size);
+            error_code = mftscan_capture_storage_size_fragment(
+                volume_handle,
+                attribute_header,
+                attribute_header->length,
+                require_unnamed,
+                data_size);
             if (error_code != MFTSCAN_OK) {
                 goto cleanup;
             }
@@ -708,11 +952,14 @@ cleanup:
 static MftscanError mftscan_resolve_data_size_from_attribute_list(
     const MftscanVolumeHandle *volume_handle,
     uint64_t base_record_frn,
-    const MftscanNtfsParseState *parse_state,
+    bool is_system,
+    bool is_directory,
+    MftscanNtfsParseState *parse_state,
     MftscanNtfsDataSizeCandidate *resolved_size) {
     size_t offset = 0;
+    bool saw_data_entry = false;
     bool saw_vcn0_entry = false;
-    size_t follow_count = 0;
+    MftscanNtfsDataSizeCandidate combined_size = { 0 };
 
     if (volume_handle == NULL || parse_state == NULL || resolved_size == NULL) {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
@@ -749,60 +996,94 @@ static MftscanError mftscan_resolve_data_size_from_attribute_list(
             return MFTSCAN_ERROR_MFT_PARSE;
         }
 
-        if (entry->type == MFTSCAN_ATTRIBUTE_DATA &&
-            entry->name_length == 0U &&
-            entry->lowest_vcn == 0ULL) {
-            saw_vcn0_entry = true;
-            if (++follow_count > MFTSCAN_MAX_ATTRIBUTE_LIST_DEPTH) {
-                mftscan_set_error_detail("$ATTRIBUTE_LIST 跟随次数超过上限");
-                return MFTSCAN_ERROR_MFT_PARSE;
-            }
+        if ((entry->type == MFTSCAN_ATTRIBUTE_DATA && entry->name_length == 0U) ||
+            (is_system &&
+                ((!is_directory &&
+                    ((entry->type == MFTSCAN_ATTRIBUTE_DATA && entry->name_length != 0U) ||
+                        entry->type == MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION ||
+                        entry->type == MFTSCAN_ATTRIBUTE_BITMAP)) ||
+                    (is_directory &&
+                        (entry->type == MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION ||
+                            entry->type == MFTSCAN_ATTRIBUTE_BITMAP))))) {
+            MftscanNtfsDataSizeCandidate fragment_size = { 0 };
+            bool is_primary_data = (entry->type == MFTSCAN_ATTRIBUTE_DATA && entry->name_length == 0U);
 
             segment_frn = entry->segment_reference & MFTSCAN_FRN_MASK;
             if (segment_frn == 0ULL) {
-                mftscan_set_error_detail("$ATTRIBUTE_LIST 未命名 $DATA entry 的 FRN 为 0");
+                mftscan_set_error_detail("$ATTRIBUTE_LIST 相关 entry 的 FRN 为 0");
                 return MFTSCAN_ERROR_MFT_PARSE;
             }
 
             if (segment_frn == base_record_frn) {
-                if (!parse_state->direct_data_size.present) {
-                    mftscan_set_error_detail("$ATTRIBUTE_LIST 指向 base record，但 base 中没有未命名 $DATA");
-                    return MFTSCAN_ERROR_MFT_PARSE;
+                if (is_primary_data && entry->lowest_vcn == 0ULL && parse_state->direct_data_size.present) {
+                    fragment_size = parse_state->direct_data_size;
+                } else {
+                    error_code = mftscan_find_attribute_size_in_record(
+                        volume_handle,
+                        segment_frn,
+                        base_record_frn,
+                        entry->type,
+                        entry->attribute_id,
+                        is_primary_data,
+                        &fragment_size);
+                    if (error_code != MFTSCAN_OK) {
+                        return error_code;
+                    }
                 }
-
-                *resolved_size = parse_state->direct_data_size;
-                return MFTSCAN_OK;
+            } else {
+                error_code = mftscan_find_attribute_size_in_record(
+                    volume_handle,
+                    segment_frn,
+                    base_record_frn,
+                    entry->type,
+                    entry->attribute_id,
+                    is_primary_data,
+                    &fragment_size);
+                if (error_code != MFTSCAN_OK) {
+                    return error_code;
+                }
             }
 
-            error_code = mftscan_find_data_size_in_record(
-                volume_handle,
-                segment_frn,
-                base_record_frn,
-                entry->attribute_id,
-                resolved_size);
-            if (error_code != MFTSCAN_OK) {
-                return error_code;
-            }
-            if (!resolved_size->present) {
+            if (!fragment_size.present) {
                 mftscan_set_error_detail(
-                    "extension FRN %llu 未找到属性号 %u 的未命名 $DATA",
+                    "extension FRN %llu 未找到属性号 %u 的目标属性",
                     (unsigned long long)segment_frn,
                     (unsigned int)entry->attribute_id);
                 return MFTSCAN_ERROR_MFT_PARSE;
             }
 
-            return MFTSCAN_OK;
+            if (is_primary_data) {
+                saw_data_entry = true;
+                if (!mftscan_add_data_size_candidate(&combined_size, &fragment_size)) {
+                    return MFTSCAN_ERROR_MFT_PARSE;
+                }
+                if (entry->lowest_vcn == 0ULL) {
+                    saw_vcn0_entry = true;
+                }
+            } else if (is_directory) {
+                if (!mftscan_add_data_size_candidate(&parse_state->directory_self_size, &fragment_size)) {
+                    return MFTSCAN_ERROR_MFT_PARSE;
+                }
+            } else {
+                if (!mftscan_add_data_size_candidate(&parse_state->fallback_stream_size, &fragment_size)) {
+                    return MFTSCAN_ERROR_MFT_PARSE;
+                }
+            }
         }
 
         offset += entry->record_length;
     }
 
-    if (parse_state->direct_data_size.present) {
-        *resolved_size = parse_state->direct_data_size;
+    if (combined_size.present) {
+        if (!saw_vcn0_entry) {
+            mftscan_set_error_detail("$ATTRIBUTE_LIST 有未命名 $DATA entry 但缺少 lowest_vcn 0");
+            return MFTSCAN_ERROR_MFT_PARSE;
+        }
+        *resolved_size = combined_size;
         return MFTSCAN_OK;
     }
 
-    if (saw_vcn0_entry) {
+    if (saw_data_entry) {
         mftscan_set_error_detail("$ATTRIBUTE_LIST 有未命名 $DATA entry 但未解析出大小");
         return MFTSCAN_ERROR_MFT_PARSE;
     }
@@ -887,6 +1168,7 @@ MftscanError mftscan_parse_file_record(
             }
         } else if (attribute_header->type == MFTSCAN_ATTRIBUTE_DATA && !record_info->is_directory) {
             error_code = mftscan_capture_data_size_candidate(
+                volume_handle,
                 attribute_header,
                 attribute_header->length,
                 &parse_state.direct_data_size);
@@ -896,7 +1178,68 @@ MftscanError mftscan_parse_file_record(
                 }
                 goto cleanup;
             }
-        } else if (attribute_header->type == MFTSCAN_ATTRIBUTE_ATTRIBUTE_LIST && !record_info->is_directory) {
+            if (!parse_state.direct_data_size.present &&
+                record_info->is_system &&
+                mftscan_is_system_file_fallback_attribute(attribute_header)) {
+                MftscanNtfsDataSizeCandidate fallback_size = { 0 };
+                error_code = mftscan_capture_storage_size_fragment(
+                    volume_handle,
+                    attribute_header,
+                    attribute_header->length,
+                    false,
+                    &fallback_size);
+                if (error_code != MFTSCAN_OK) {
+                    if (mftscan_error_detail()[0] == '\0') {
+                        mftscan_set_error_detail("FRN %llu 命名系统流解析失败", (unsigned long long)record_info->frn);
+                    }
+                    goto cleanup;
+                }
+                if (!mftscan_add_data_size_candidate(&parse_state.fallback_stream_size, &fallback_size)) {
+                    error_code = MFTSCAN_ERROR_MFT_PARSE;
+                    goto cleanup;
+                }
+            }
+        } else if (!record_info->is_directory &&
+            record_info->is_system &&
+            mftscan_is_system_file_fallback_attribute(attribute_header)) {
+            MftscanNtfsDataSizeCandidate fallback_size = { 0 };
+            error_code = mftscan_capture_storage_size_fragment(
+                volume_handle,
+                attribute_header,
+                attribute_header->length,
+                false,
+                &fallback_size);
+            if (error_code != MFTSCAN_OK) {
+                if (mftscan_error_detail()[0] == '\0') {
+                    mftscan_set_error_detail("FRN %llu 系统元文件属性解析失败", (unsigned long long)record_info->frn);
+                }
+                goto cleanup;
+            }
+            if (!mftscan_add_data_size_candidate(&parse_state.fallback_stream_size, &fallback_size)) {
+                error_code = MFTSCAN_ERROR_MFT_PARSE;
+                goto cleanup;
+            }
+        } else if (record_info->is_directory &&
+            record_info->is_system &&
+            mftscan_is_system_directory_self_attribute(attribute_header)) {
+            MftscanNtfsDataSizeCandidate directory_size = { 0 };
+            error_code = mftscan_capture_storage_size_fragment(
+                volume_handle,
+                attribute_header,
+                attribute_header->length,
+                false,
+                &directory_size);
+            if (error_code != MFTSCAN_OK) {
+                if (mftscan_error_detail()[0] == '\0') {
+                    mftscan_set_error_detail("FRN %llu 系统目录元数据解析失败", (unsigned long long)record_info->frn);
+                }
+                goto cleanup;
+            }
+            if (!mftscan_add_data_size_candidate(&parse_state.directory_self_size, &directory_size)) {
+                error_code = MFTSCAN_ERROR_MFT_PARSE;
+                goto cleanup;
+            }
+        } else if (attribute_header->type == MFTSCAN_ATTRIBUTE_ATTRIBUTE_LIST) {
             error_code = mftscan_capture_attribute_list(
                 volume_handle,
                 attribute_header,
@@ -913,31 +1256,37 @@ MftscanError mftscan_parse_file_record(
         attribute_offset += attribute_header->length;
     }
 
+    if (parse_state.has_attribute_list) {
+        error_code = mftscan_resolve_data_size_from_attribute_list(
+            volume_handle,
+            record_info->frn,
+            record_info->is_system,
+            record_info->is_directory,
+            &parse_state,
+            &final_size);
+        if (error_code != MFTSCAN_OK) {
+            if (mftscan_error_detail()[0] == '\0') {
+                mftscan_set_error_detail("FRN %llu $ATTRIBUTE_LIST 解析失败", (unsigned long long)record_info->frn);
+            }
+            goto cleanup;
+        }
+    }
+
     if (!record_info->is_directory) {
-        if (parse_state.has_attribute_list) {
-            error_code = mftscan_resolve_data_size_from_attribute_list(
-                volume_handle,
-                record_info->frn,
-                &parse_state,
-                &final_size);
-            if (error_code != MFTSCAN_OK) {
-                if (mftscan_error_detail()[0] == '\0') {
-                    mftscan_set_error_detail("FRN %llu $ATTRIBUTE_LIST 解析失败", (unsigned long long)record_info->frn);
-                }
-                goto cleanup;
-            }
-            if (!final_size.present) {
-                if (parse_state.file_name_size.present) {
-                    final_size = parse_state.file_name_size;
-                } else {
-                    mftscan_set_error_detail("FRN %llu 有 $ATTRIBUTE_LIST 但未得到未命名 $DATA 大小", (unsigned long long)record_info->frn);
-                    error_code = MFTSCAN_ERROR_MFT_PARSE;
-                    goto cleanup;
-                }
-            }
-        } else if (parse_state.direct_data_size.present) {
+        if (parse_state.direct_data_size.present && !final_size.present) {
             final_size = parse_state.direct_data_size;
-        } else if (parse_state.file_name_size.present) {
+        } else if (parse_state.fallback_stream_size.present && !final_size.present) {
+            if (parse_state.file_name_size.present) {
+                final_size = parse_state.file_name_size;
+                final_size.allocated_size = parse_state.fallback_stream_size.allocated_size;
+                if (final_size.logical_size == 0ULL) {
+                    final_size.logical_size = parse_state.fallback_stream_size.logical_size;
+                }
+                final_size.present = true;
+            } else {
+                final_size = parse_state.fallback_stream_size;
+            }
+        } else if (!final_size.present && parse_state.file_name_size.present) {
             final_size = parse_state.file_name_size;
         }
 
@@ -946,6 +1295,9 @@ MftscanError mftscan_parse_file_record(
             record_info->allocated_size = final_size.allocated_size;
             record_info->has_data_size = true;
         }
+    } else if (parse_state.directory_self_size.present) {
+        record_info->allocated_size = parse_state.directory_self_size.allocated_size;
+        record_info->has_data_size = true;
     }
 
     if (record_info->name == NULL && record_info->frn != MFTSCAN_ROOT_FRN) {
