@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #include "model.h"
 
@@ -102,6 +103,7 @@ typedef struct MftscanNtfsDataSizeCandidate {
 typedef struct MftscanNtfsParseState {
     MftscanNtfsDataSizeCandidate file_name_size;
     MftscanNtfsDataSizeCandidate direct_data_size;
+    MftscanNtfsDataSizeCandidate wof_backing_size;
     MftscanNtfsDataSizeCandidate fallback_stream_size;
     MftscanNtfsDataSizeCandidate directory_self_size;
     uint8_t *attribute_list_data;
@@ -277,6 +279,54 @@ static bool mftscan_attribute_name_matches_list_entry(
     attribute_name = (const uint8_t *)attribute_header + attribute_header->name_offset;
     entry_name = (const uint8_t *)entry + entry->name_offset;
     return memcmp(attribute_name, entry_name, name_size_bytes) == 0;
+}
+
+static bool mftscan_attribute_name_equals(
+    const MftscanNtfsAttributeHeader *attribute_header,
+    size_t attribute_length,
+    const wchar_t *expected_name) {
+    size_t expected_length = 0;
+    const wchar_t *attribute_name = NULL;
+
+    if (attribute_header == NULL || expected_name == NULL) {
+        return false;
+    }
+    if (!mftscan_attribute_name_is_valid(attribute_header, attribute_length)) {
+        return false;
+    }
+
+    expected_length = wcslen(expected_name);
+    if (attribute_header->name_length != expected_length) {
+        return false;
+    }
+    if (expected_length == 0U) {
+        return true;
+    }
+
+    attribute_name = (const wchar_t *)((const uint8_t *)attribute_header + attribute_header->name_offset);
+    return _wcsnicmp(attribute_name, expected_name, expected_length) == 0;
+}
+
+static bool mftscan_attribute_list_entry_name_equals(
+    const MftscanNtfsAttributeListEntry *entry,
+    const wchar_t *expected_name) {
+    size_t expected_length = 0;
+    const wchar_t *entry_name = NULL;
+
+    if (entry == NULL || expected_name == NULL) {
+        return false;
+    }
+
+    expected_length = wcslen(expected_name);
+    if (entry->name_length != expected_length) {
+        return false;
+    }
+    if (expected_length == 0U) {
+        return true;
+    }
+
+    entry_name = (const wchar_t *)((const uint8_t *)entry + entry->name_offset);
+    return _wcsnicmp(entry_name, expected_name, expected_length) == 0;
 }
 
 static MftscanError mftscan_capture_file_name(
@@ -1054,6 +1104,8 @@ static MftscanError mftscan_resolve_data_size_from_attribute_list(
                     entry->type == MFTSCAN_ATTRIBUTE_BITMAP))) {
             MftscanNtfsDataSizeCandidate fragment_size = { 0 };
             bool is_primary_data = (entry->type == MFTSCAN_ATTRIBUTE_DATA && entry->name_length == 0U);
+            bool is_wof_backing_stream = (entry->type == MFTSCAN_ATTRIBUTE_DATA && entry->name_length != 0U &&
+                mftscan_attribute_list_entry_name_equals(entry, L"WofCompressedData"));
 
             segment_frn = entry->segment_reference & MFTSCAN_FRN_MASK;
             if (segment_frn == 0ULL) {
@@ -1107,6 +1159,10 @@ static MftscanError mftscan_resolve_data_size_from_attribute_list(
                 }
             } else if (is_directory) {
                 if (!mftscan_add_data_size_candidate(&parse_state->directory_self_size, &fragment_size)) {
+                    return MFTSCAN_ERROR_MFT_PARSE;
+                }
+            } else if (is_wof_backing_stream) {
+                if (!mftscan_add_data_size_candidate(&parse_state->wof_backing_size, &fragment_size)) {
                     return MFTSCAN_ERROR_MFT_PARSE;
                 }
             } else {
@@ -1226,6 +1282,10 @@ MftscanError mftscan_parse_file_record(
             if (attribute_header->name_length != 0U &&
                 mftscan_is_metadata_tree_file_fallback_attribute(attribute_header)) {
                 MftscanNtfsDataSizeCandidate fallback_size = { 0 };
+                bool is_wof_backing_stream = mftscan_attribute_name_equals(
+                    attribute_header,
+                    attribute_header->length,
+                    L"WofCompressedData");
                 error_code = mftscan_capture_storage_size_fragment(
                     volume_handle,
                     attribute_header,
@@ -1238,7 +1298,12 @@ MftscanError mftscan_parse_file_record(
                     }
                     goto cleanup;
                 }
-                if (!mftscan_add_data_size_candidate(&parse_state.fallback_stream_size, &fallback_size)) {
+                if (is_wof_backing_stream) {
+                    if (!mftscan_add_data_size_candidate(&parse_state.wof_backing_size, &fallback_size)) {
+                        error_code = MFTSCAN_ERROR_MFT_PARSE;
+                        goto cleanup;
+                    }
+                } else if (!mftscan_add_data_size_candidate(&parse_state.fallback_stream_size, &fallback_size)) {
                     error_code = MFTSCAN_ERROR_MFT_PARSE;
                     goto cleanup;
                 }
@@ -1325,6 +1390,9 @@ MftscanError mftscan_parse_file_record(
         }
 
         if (final_size.present) {
+            if (final_size.allocated_size == 0ULL && parse_state.wof_backing_size.present) {
+                final_size.allocated_size = parse_state.wof_backing_size.allocated_size;
+            }
             record_info->logical_size = final_size.logical_size;
             record_info->allocated_size = final_size.allocated_size;
             record_info->has_data_size = true;
