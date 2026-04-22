@@ -104,6 +104,7 @@ MftscanError mftscan_open_volume(const MftscanOptions *options, MftscanVolumeHan
     }
 
     volume_handle->bytes_per_sector = volume_data.BytesPerSector;
+    volume_handle->bytes_per_cluster = volume_data.BytesPerCluster;
     volume_handle->bytes_per_file_record = volume_data.BytesPerFileRecordSegment;
     record_count = (ULONGLONG)(volume_data.MftValidDataLength.QuadPart / volume_data.BytesPerFileRecordSegment);
     volume_handle->highest_record_number = (record_count > 0ULL) ? (uint64_t)(record_count - 1ULL) : 0ULL;

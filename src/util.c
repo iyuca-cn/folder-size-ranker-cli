@@ -17,7 +17,7 @@ static void mftscan_clear_error_detail(void) {
     g_mftscan_error_detail[0] = '\0';
 }
 
-static void mftscan_set_error_detail(const char *format_text, ...) {
+void mftscan_set_error_detail(const char *format_text, ...) {
     va_list argument_list;
 
     if (format_text == NULL) {
