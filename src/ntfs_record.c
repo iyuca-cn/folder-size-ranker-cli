@@ -15,6 +15,8 @@
 #define MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION 0xa0UL
 #define MFTSCAN_ATTRIBUTE_BITMAP 0xb0UL
 #define MFTSCAN_ATTRIBUTE_LOGGED_UTILITY_STREAM 0x100UL
+#define MFTSCAN_ATTRIBUTE_FLAG_COMPRESSED 0x0001U
+#define MFTSCAN_ATTRIBUTE_FLAG_SPARSE 0x8000U
 
 #pragma pack(push, 1)
 typedef struct MftscanNtfsFileRecordHeader {
@@ -404,6 +406,16 @@ static MftscanError mftscan_calculate_nonresident_allocated_size(
     return saw_terminator ? MFTSCAN_OK : MFTSCAN_ERROR_MFT_PARSE;
 }
 
+static bool mftscan_nonresident_attribute_uses_runlist_allocated_size(
+    const MftscanNtfsAttributeHeader *attribute_header) {
+    if (attribute_header == NULL) {
+        return false;
+    }
+
+    return (attribute_header->flags & MFTSCAN_ATTRIBUTE_FLAG_SPARSE) != 0U &&
+        (attribute_header->flags & MFTSCAN_ATTRIBUTE_FLAG_COMPRESSED) == 0U;
+}
+
 static MftscanError mftscan_capture_data_size_candidate(
     const MftscanVolumeHandle *volume_handle,
     const MftscanNtfsAttributeHeader *attribute_header,
@@ -438,7 +450,6 @@ static MftscanError mftscan_capture_data_size_candidate(
         const MftscanNtfsNonResidentAttributeHeader *non_resident_header =
             (const MftscanNtfsNonResidentAttributeHeader *)attribute_header;
         uint64_t allocated_size = 0ULL;
-        MftscanError error_code = MFTSCAN_OK;
 
         if (volume_handle == NULL || sizeof(MftscanNtfsNonResidentAttributeHeader) > attribute_length) {
             return MFTSCAN_ERROR_MFT_PARSE;
@@ -448,13 +459,17 @@ static MftscanError mftscan_capture_data_size_candidate(
             return MFTSCAN_OK;
         }
 
-        error_code = mftscan_calculate_nonresident_allocated_size(
-            volume_handle,
-            non_resident_header,
-            attribute_length,
-            &allocated_size);
-        if (error_code != MFTSCAN_OK) {
-            return error_code;
+        if (mftscan_nonresident_attribute_uses_runlist_allocated_size(&non_resident_header->header)) {
+            MftscanError error_code = mftscan_calculate_nonresident_allocated_size(
+                volume_handle,
+                non_resident_header,
+                attribute_length,
+                &allocated_size);
+            if (error_code != MFTSCAN_OK) {
+                return error_code;
+            }
+        } else {
+            allocated_size = non_resident_header->allocated_size;
         }
 
         mftscan_set_data_size_candidate(candidate, non_resident_header->data_size, allocated_size);
@@ -488,19 +503,22 @@ static MftscanError mftscan_capture_data_size_fragment(
             (const MftscanNtfsNonResidentAttributeHeader *)attribute_header;
         uint64_t allocated_size = 0ULL;
         uint64_t logical_size = 0ULL;
-        MftscanError error_code = MFTSCAN_OK;
 
         if (volume_handle == NULL || sizeof(MftscanNtfsNonResidentAttributeHeader) > attribute_length) {
             return MFTSCAN_ERROR_MFT_PARSE;
         }
 
-        error_code = mftscan_calculate_nonresident_allocated_size(
-            volume_handle,
-            non_resident_header,
-            attribute_length,
-            &allocated_size);
-        if (error_code != MFTSCAN_OK) {
-            return error_code;
+        if (mftscan_nonresident_attribute_uses_runlist_allocated_size(&non_resident_header->header)) {
+            MftscanError error_code = mftscan_calculate_nonresident_allocated_size(
+                volume_handle,
+                non_resident_header,
+                attribute_length,
+                &allocated_size);
+            if (error_code != MFTSCAN_OK) {
+                return error_code;
+            }
+        } else if (non_resident_header->lowest_vcn == 0ULL) {
+            allocated_size = non_resident_header->allocated_size;
         }
 
         if (non_resident_header->lowest_vcn == 0ULL) {
@@ -547,19 +565,22 @@ static MftscanError mftscan_capture_storage_size_fragment(
             (const MftscanNtfsNonResidentAttributeHeader *)attribute_header;
         uint64_t allocated_size = 0ULL;
         uint64_t logical_size = 0ULL;
-        MftscanError error_code = MFTSCAN_OK;
 
         if (volume_handle == NULL || sizeof(MftscanNtfsNonResidentAttributeHeader) > attribute_length) {
             return MFTSCAN_ERROR_MFT_PARSE;
         }
 
-        error_code = mftscan_calculate_nonresident_allocated_size(
-            volume_handle,
-            non_resident_header,
-            attribute_length,
-            &allocated_size);
-        if (error_code != MFTSCAN_OK) {
-            return error_code;
+        if (mftscan_nonresident_attribute_uses_runlist_allocated_size(&non_resident_header->header)) {
+            MftscanError error_code = mftscan_calculate_nonresident_allocated_size(
+                volume_handle,
+                non_resident_header,
+                attribute_length,
+                &allocated_size);
+            if (error_code != MFTSCAN_OK) {
+                return error_code;
+            }
+        } else if (non_resident_header->lowest_vcn == 0ULL) {
+            allocated_size = non_resident_header->allocated_size;
         }
 
         if (non_resident_header->lowest_vcn == 0ULL) {

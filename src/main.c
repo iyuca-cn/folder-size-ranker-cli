@@ -44,6 +44,9 @@ int wmain(int argc, wchar_t **argv) {
     if (error_code == MFTSCAN_OK) {
         error_code = mftscan_finalize_metadata_tree(&context);
     }
+    if (error_code == MFTSCAN_OK) {
+        error_code = mftscan_backfill_zero_allocated_files(&context);
+    }
     if (error_code == MFTSCAN_OK && !options.output_all) {
         error_code = mftscan_build_results(&context, &options, &scan_result);
     }

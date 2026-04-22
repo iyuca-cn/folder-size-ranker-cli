@@ -93,6 +93,7 @@ typedef struct MftscanVolumeHandle {
 
 struct MftscanContext {
     wchar_t volume[3];
+    DWORD bytes_per_cluster;
     MftscanDirVector directories;
     MftscanFileVector files;
     MftscanUint64Map directory_index;
@@ -132,6 +133,7 @@ MftscanError mftscan_parse_file_record(
     MftscanRecordInfo *record_info);
 MftscanError mftscan_ingest_record(MftscanContext *context, MftscanRecordInfo *record_info);
 MftscanError mftscan_finalize_metadata_tree(MftscanContext *context);
+MftscanError mftscan_backfill_zero_allocated_files(MftscanContext *context);
 MftscanError mftscan_build_path(const MftscanContext *context, uint64_t directory_frn, wchar_t **path_text);
 
 #endif

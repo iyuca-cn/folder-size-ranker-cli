@@ -156,6 +156,67 @@ static void mftscan_adjust_directory_totals(
     }
 }
 
+static bool mftscan_try_query_allocated_size(const wchar_t *path, uint64_t *allocated_size) {
+    DWORD high_size = 0;
+    DWORD low_size = 0;
+    DWORD last_error = ERROR_SUCCESS;
+
+    if (path == NULL || allocated_size == NULL) {
+        return false;
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    low_size = GetCompressedFileSizeW(path, &high_size);
+    last_error = GetLastError();
+    if (low_size == INVALID_FILE_SIZE && last_error != ERROR_SUCCESS) {
+        return false;
+    }
+
+    *allocated_size = ((uint64_t)high_size << 32U) | low_size;
+    return true;
+}
+
+static MftscanError mftscan_build_file_path(
+    const MftscanContext *context,
+    const MftscanFileNode *file_node,
+    wchar_t **path_text) {
+    wchar_t *parent_path = NULL;
+    wchar_t *built_path = NULL;
+    size_t parent_length = 0;
+    size_t name_length = 0;
+    bool needs_separator = false;
+    MftscanError error_code = MFTSCAN_OK;
+
+    if (context == NULL || file_node == NULL || path_text == NULL || file_node->name == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    *path_text = NULL;
+    error_code = mftscan_build_path(context, file_node->parent_frn, &parent_path);
+    if (error_code != MFTSCAN_OK) {
+        return error_code;
+    }
+
+    parent_length = wcslen(parent_path);
+    name_length = wcslen(file_node->name);
+    needs_separator = parent_length > 0U && parent_path[parent_length - 1U] != L'\\';
+    built_path = (wchar_t *)calloc(parent_length + name_length + (needs_separator ? 2U : 1U), sizeof(wchar_t));
+    if (built_path == NULL) {
+        free(parent_path);
+        return MFTSCAN_ERROR_OUT_OF_MEMORY;
+    }
+
+    wcscpy(built_path, parent_path);
+    if (needs_separator) {
+        wcscat(built_path, L"\\");
+    }
+    wcscat(built_path, file_node->name);
+
+    free(parent_path);
+    *path_text = built_path;
+    return MFTSCAN_OK;
+}
+
 static uint64_t mftscan_sort_value(const MftscanLeafResult *item, MftscanSortMode sort_mode) {
     return (sort_mode == MFTSCAN_SORT_ALLOCATED) ? item->allocated_size : item->logical_size;
 }
@@ -366,6 +427,53 @@ MftscanError mftscan_finalize_metadata_tree(MftscanContext *context) {
                 file_node->allocated_size = new_allocated_size;
             }
         }
+    }
+
+    return MFTSCAN_OK;
+}
+
+MftscanError mftscan_backfill_zero_allocated_files(MftscanContext *context) {
+    size_t index = 0;
+
+    if (context == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (context->bytes_per_cluster == 0U) {
+        return MFTSCAN_OK;
+    }
+
+    for (index = 0; index < context->files.count; ++index) {
+        MftscanFileNode *file_node = &context->files.items[index];
+        wchar_t *path_text = NULL;
+        uint64_t allocated_size = 0ULL;
+        MftscanError error_code = MFTSCAN_OK;
+
+        if (file_node->name == NULL || file_node->name[0] == L'\0') {
+            continue;
+        }
+        if (file_node->allocated_size != 0ULL || file_node->logical_size < context->bytes_per_cluster) {
+            continue;
+        }
+
+        error_code = mftscan_build_file_path(context, file_node, &path_text);
+        if (error_code != MFTSCAN_OK) {
+            return error_code;
+        }
+
+        if (mftscan_try_query_allocated_size(path_text, &allocated_size) &&
+            allocated_size != file_node->allocated_size) {
+            mftscan_adjust_directory_totals(
+                context,
+                file_node->parent_frn,
+                file_node->logical_size,
+                file_node->logical_size,
+                file_node->allocated_size,
+                allocated_size);
+            file_node->allocated_size = allocated_size;
+        }
+
+        free(path_text);
     }
 
     return MFTSCAN_OK;

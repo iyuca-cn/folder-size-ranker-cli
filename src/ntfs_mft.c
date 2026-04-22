@@ -109,11 +109,14 @@ MftscanError mftscan_scan_volume_ntfs(MftscanContext *context, const MftscanOpti
     context->volume[0] = options->volume[0];
     context->volume[1] = options->volume[1];
     context->volume[2] = L'\0';
+    context->bytes_per_cluster = 0U;
 
     error_code = mftscan_open_volume(options, &volume_handle);
     if (error_code != MFTSCAN_OK) {
         return error_code;
     }
+
+    context->bytes_per_cluster = volume_handle.bytes_per_cluster;
 
     output_buffer_size = offsetof(NTFS_FILE_RECORD_OUTPUT_BUFFER, FileRecordBuffer) + volume_handle.bytes_per_file_record;
     output_buffer = (NTFS_FILE_RECORD_OUTPUT_BUFFER *)malloc(output_buffer_size);
