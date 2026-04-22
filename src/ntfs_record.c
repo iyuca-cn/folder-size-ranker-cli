@@ -14,6 +14,7 @@
 #define MFTSCAN_ATTRIBUTE_DATA 0x80UL
 #define MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION 0xa0UL
 #define MFTSCAN_ATTRIBUTE_BITMAP 0xb0UL
+#define MFTSCAN_ATTRIBUTE_LOGGED_UTILITY_STREAM 0x100UL
 
 #pragma pack(push, 1)
 typedef struct MftscanNtfsFileRecordHeader {
@@ -160,7 +161,7 @@ static bool mftscan_add_data_size_candidate(
     return true;
 }
 
-static bool mftscan_is_system_file_fallback_attribute(const MftscanNtfsAttributeHeader *attribute_header) {
+static bool mftscan_is_metadata_tree_file_fallback_attribute(const MftscanNtfsAttributeHeader *attribute_header) {
     if (attribute_header == NULL) {
         return false;
     }
@@ -170,10 +171,11 @@ static bool mftscan_is_system_file_fallback_attribute(const MftscanNtfsAttribute
     }
 
     return attribute_header->type == MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION ||
-        attribute_header->type == MFTSCAN_ATTRIBUTE_BITMAP;
+        attribute_header->type == MFTSCAN_ATTRIBUTE_BITMAP ||
+        attribute_header->type == MFTSCAN_ATTRIBUTE_LOGGED_UTILITY_STREAM;
 }
 
-static bool mftscan_is_system_directory_self_attribute(const MftscanNtfsAttributeHeader *attribute_header) {
+static bool mftscan_is_metadata_tree_directory_self_attribute(const MftscanNtfsAttributeHeader *attribute_header) {
     if (attribute_header == NULL) {
         return false;
     }
@@ -245,6 +247,36 @@ static bool mftscan_attribute_name_is_valid(
         attribute_header->name_offset + name_size_bytes <= attribute_length;
 }
 
+static bool mftscan_attribute_name_matches_list_entry(
+    const MftscanNtfsAttributeHeader *attribute_header,
+    size_t attribute_length,
+    const MftscanNtfsAttributeListEntry *entry) {
+    size_t name_size_bytes = 0;
+    const uint8_t *attribute_name = NULL;
+    const uint8_t *entry_name = NULL;
+
+    if (attribute_header == NULL || entry == NULL) {
+        return false;
+    }
+
+    if (!mftscan_attribute_name_is_valid(attribute_header, attribute_length)) {
+        return false;
+    }
+
+    if (attribute_header->name_length != entry->name_length) {
+        return false;
+    }
+
+    if (attribute_header->name_length == 0U) {
+        return true;
+    }
+
+    name_size_bytes = (size_t)attribute_header->name_length * sizeof(WCHAR);
+    attribute_name = (const uint8_t *)attribute_header + attribute_header->name_offset;
+    entry_name = (const uint8_t *)entry + entry->name_offset;
+    return memcmp(attribute_name, entry_name, name_size_bytes) == 0;
+}
+
 static MftscanError mftscan_capture_file_name(
     const MftscanNtfsResidentAttributeHeader *resident_header,
     size_t attribute_length,
@@ -279,10 +311,6 @@ static MftscanError mftscan_capture_file_name(
         }
         file_name_size->present = true;
     }
-    if ((file_name_attribute->file_attributes & FILE_ATTRIBUTE_SYSTEM) != 0U) {
-        record_info->is_system = true;
-    }
-
     candidate_priority = mftscan_name_priority(file_name_attribute->file_name_type);
     if (candidate_priority < record_info->name_priority) {
         return MFTSCAN_OK;
@@ -834,8 +862,7 @@ static MftscanError mftscan_find_attribute_size_in_record(
     uint64_t segment_frn,
     uint64_t base_record_frn,
     uint32_t attribute_type,
-    uint16_t attribute_number,
-    bool require_unnamed,
+    const MftscanNtfsAttributeListEntry *target_entry,
     MftscanNtfsDataSizeCandidate *data_size) {
     NTFS_FILE_RECORD_OUTPUT_BUFFER *output_buffer = NULL;
     MftscanNtfsFileRecordHeader *header = NULL;
@@ -926,12 +953,12 @@ static MftscanError mftscan_find_attribute_size_in_record(
         }
 
         if (attribute_header->type == attribute_type &&
-            attribute_header->attribute_number == attribute_number) {
+            mftscan_attribute_name_matches_list_entry(attribute_header, attribute_header->length, target_entry)) {
             error_code = mftscan_capture_storage_size_fragment(
                 volume_handle,
                 attribute_header,
                 attribute_header->length,
-                require_unnamed,
+                target_entry->name_length == 0U,
                 data_size);
             if (error_code != MFTSCAN_OK) {
                 goto cleanup;
@@ -952,7 +979,6 @@ cleanup:
 static MftscanError mftscan_resolve_data_size_from_attribute_list(
     const MftscanVolumeHandle *volume_handle,
     uint64_t base_record_frn,
-    bool is_system,
     bool is_directory,
     MftscanNtfsParseState *parse_state,
     MftscanNtfsDataSizeCandidate *resolved_size) {
@@ -997,14 +1023,14 @@ static MftscanError mftscan_resolve_data_size_from_attribute_list(
         }
 
         if ((entry->type == MFTSCAN_ATTRIBUTE_DATA && entry->name_length == 0U) ||
-            (is_system &&
-                ((!is_directory &&
-                    ((entry->type == MFTSCAN_ATTRIBUTE_DATA && entry->name_length != 0U) ||
-                        entry->type == MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION ||
-                        entry->type == MFTSCAN_ATTRIBUTE_BITMAP)) ||
-                    (is_directory &&
-                        (entry->type == MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION ||
-                            entry->type == MFTSCAN_ATTRIBUTE_BITMAP))))) {
+            (!is_directory &&
+                (((entry->type == MFTSCAN_ATTRIBUTE_DATA && entry->name_length != 0U) ||
+                    entry->type == MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION ||
+                    entry->type == MFTSCAN_ATTRIBUTE_BITMAP ||
+                    entry->type == MFTSCAN_ATTRIBUTE_LOGGED_UTILITY_STREAM))) ||
+            (is_directory &&
+                (entry->type == MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION ||
+                    entry->type == MFTSCAN_ATTRIBUTE_BITMAP))) {
             MftscanNtfsDataSizeCandidate fragment_size = { 0 };
             bool is_primary_data = (entry->type == MFTSCAN_ATTRIBUTE_DATA && entry->name_length == 0U);
 
@@ -1023,8 +1049,7 @@ static MftscanError mftscan_resolve_data_size_from_attribute_list(
                         segment_frn,
                         base_record_frn,
                         entry->type,
-                        entry->attribute_id,
-                        is_primary_data,
+                        entry,
                         &fragment_size);
                     if (error_code != MFTSCAN_OK) {
                         return error_code;
@@ -1036,8 +1061,7 @@ static MftscanError mftscan_resolve_data_size_from_attribute_list(
                     segment_frn,
                     base_record_frn,
                     entry->type,
-                    entry->attribute_id,
-                    is_primary_data,
+                    entry,
                     &fragment_size);
                 if (error_code != MFTSCAN_OK) {
                     return error_code;
@@ -1178,9 +1202,8 @@ MftscanError mftscan_parse_file_record(
                 }
                 goto cleanup;
             }
-            if (!parse_state.direct_data_size.present &&
-                record_info->is_system &&
-                mftscan_is_system_file_fallback_attribute(attribute_header)) {
+            if (attribute_header->name_length != 0U &&
+                mftscan_is_metadata_tree_file_fallback_attribute(attribute_header)) {
                 MftscanNtfsDataSizeCandidate fallback_size = { 0 };
                 error_code = mftscan_capture_storage_size_fragment(
                     volume_handle,
@@ -1200,8 +1223,7 @@ MftscanError mftscan_parse_file_record(
                 }
             }
         } else if (!record_info->is_directory &&
-            record_info->is_system &&
-            mftscan_is_system_file_fallback_attribute(attribute_header)) {
+            mftscan_is_metadata_tree_file_fallback_attribute(attribute_header)) {
             MftscanNtfsDataSizeCandidate fallback_size = { 0 };
             error_code = mftscan_capture_storage_size_fragment(
                 volume_handle,
@@ -1220,8 +1242,7 @@ MftscanError mftscan_parse_file_record(
                 goto cleanup;
             }
         } else if (record_info->is_directory &&
-            record_info->is_system &&
-            mftscan_is_system_directory_self_attribute(attribute_header)) {
+            mftscan_is_metadata_tree_directory_self_attribute(attribute_header)) {
             MftscanNtfsDataSizeCandidate directory_size = { 0 };
             error_code = mftscan_capture_storage_size_fragment(
                 volume_handle,
@@ -1260,7 +1281,6 @@ MftscanError mftscan_parse_file_record(
         error_code = mftscan_resolve_data_size_from_attribute_list(
             volume_handle,
             record_info->frn,
-            record_info->is_system,
             record_info->is_directory,
             &parse_state,
             &final_size);
@@ -1270,22 +1290,15 @@ MftscanError mftscan_parse_file_record(
             }
             goto cleanup;
         }
+        if (final_size.present) {
+            record_info->has_primary_stream_size = true;
+        }
     }
 
     if (!record_info->is_directory) {
         if (parse_state.direct_data_size.present && !final_size.present) {
             final_size = parse_state.direct_data_size;
-        } else if (parse_state.fallback_stream_size.present && !final_size.present) {
-            if (parse_state.file_name_size.present) {
-                final_size = parse_state.file_name_size;
-                final_size.allocated_size = parse_state.fallback_stream_size.allocated_size;
-                if (final_size.logical_size == 0ULL) {
-                    final_size.logical_size = parse_state.fallback_stream_size.logical_size;
-                }
-                final_size.present = true;
-            } else {
-                final_size = parse_state.fallback_stream_size;
-            }
+            record_info->has_primary_stream_size = true;
         } else if (!final_size.present && parse_state.file_name_size.present) {
             final_size = parse_state.file_name_size;
         }
@@ -1295,9 +1308,14 @@ MftscanError mftscan_parse_file_record(
             record_info->allocated_size = final_size.allocated_size;
             record_info->has_data_size = true;
         }
+        if (parse_state.fallback_stream_size.present) {
+            record_info->metadata_fallback_logical_size = parse_state.fallback_stream_size.logical_size;
+            record_info->metadata_fallback_allocated_size = parse_state.fallback_stream_size.allocated_size;
+            record_info->has_metadata_fallback_size = true;
+        }
     } else if (parse_state.directory_self_size.present) {
-        record_info->allocated_size = parse_state.directory_self_size.allocated_size;
-        record_info->has_data_size = true;
+        record_info->directory_metadata_allocated_size = parse_state.directory_self_size.allocated_size;
+        record_info->has_directory_metadata_size = true;
     }
 
     if (record_info->name == NULL && record_info->frn != MFTSCAN_ROOT_FRN) {

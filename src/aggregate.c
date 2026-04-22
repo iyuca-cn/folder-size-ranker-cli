@@ -62,8 +62,98 @@ static MftscanError mftscan_append_file(MftscanContext *context, MftscanRecordIn
     context->files.items[file_index].name = record_info->name;
     context->files.items[file_index].logical_size = record_info->logical_size;
     context->files.items[file_index].allocated_size = record_info->allocated_size;
+    context->files.items[file_index].metadata_fallback_logical_size = record_info->metadata_fallback_logical_size;
+    context->files.items[file_index].metadata_fallback_allocated_size = record_info->metadata_fallback_allocated_size;
+    context->files.items[file_index].has_primary_stream_size = record_info->has_primary_stream_size;
+    context->files.items[file_index].has_metadata_fallback_size = record_info->has_metadata_fallback_size;
     record_info->name = NULL;
     return MFTSCAN_OK;
+}
+
+static bool mftscan_name_equals(const wchar_t *left, const wchar_t *right) {
+    if (left == NULL || right == NULL) {
+        return false;
+    }
+
+    return _wcsicmp(left, right) == 0;
+}
+
+static bool mftscan_directory_is_in_metadata_tree(
+    MftscanContext *context,
+    size_t directory_index,
+    uint64_t extend_frn) {
+    MftscanDirNode *directory_node = NULL;
+    uint64_t current_parent = 0ULL;
+
+    if (context == NULL || directory_index >= context->directories.count) {
+        return false;
+    }
+
+    directory_node = &context->directories.items[directory_index];
+    if (directory_node->in_metadata_tree || directory_node->frn == extend_frn) {
+        directory_node->in_metadata_tree = true;
+        return true;
+    }
+
+    current_parent = directory_node->parent_frn;
+    while (current_parent != 0ULL && current_parent != MFTSCAN_ROOT_FRN) {
+        size_t parent_index = 0;
+        MftscanDirNode *parent_node = NULL;
+
+        if (current_parent == extend_frn) {
+            directory_node->in_metadata_tree = true;
+            return true;
+        }
+        if (!mftscan_map_get(&context->directory_index, current_parent, &parent_index)) {
+            break;
+        }
+
+        parent_node = &context->directories.items[parent_index];
+        if (parent_node->in_metadata_tree || parent_node->frn == extend_frn) {
+            directory_node->in_metadata_tree = true;
+            return true;
+        }
+
+        current_parent = parent_node->parent_frn;
+    }
+
+    return false;
+}
+
+static void mftscan_adjust_directory_totals(
+    MftscanContext *context,
+    uint64_t parent_frn,
+    uint64_t old_logical_size,
+    uint64_t new_logical_size,
+    uint64_t old_allocated_size,
+    uint64_t new_allocated_size) {
+    size_t parent_index = 0;
+    MftscanDirNode *directory_node = NULL;
+
+    if (context == NULL || parent_frn == 0ULL || parent_frn == MFTSCAN_ROOT_FRN) {
+        if (parent_frn == MFTSCAN_ROOT_FRN &&
+            mftscan_map_get(&context->directory_index, parent_frn, &parent_index)) {
+            directory_node = &context->directories.items[parent_index];
+        } else {
+            return;
+        }
+    } else if (mftscan_map_get(&context->directory_index, parent_frn, &parent_index)) {
+        directory_node = &context->directories.items[parent_index];
+    } else {
+        return;
+    }
+
+    if (new_logical_size >= old_logical_size) {
+        directory_node->logical_size += new_logical_size - old_logical_size;
+    } else {
+        directory_node->logical_size -= old_logical_size - new_logical_size;
+    }
+
+    if (new_allocated_size >= old_allocated_size) {
+        directory_node->allocated_size += new_allocated_size - old_allocated_size;
+    } else {
+        directory_node->allocated_size -= old_allocated_size - new_allocated_size;
+    }
 }
 
 static uint64_t mftscan_sort_value(const MftscanLeafResult *item, MftscanSortMode sort_mode) {
@@ -174,8 +264,9 @@ MftscanError mftscan_ingest_record(MftscanContext *context, MftscanRecordInfo *r
             record_info->name = NULL;
         }
 
-        directory_node->logical_size += record_info->logical_size;
-        directory_node->allocated_size += record_info->allocated_size;
+        if (record_info->has_directory_metadata_size) {
+            directory_node->metadata_allocated_size = record_info->directory_metadata_allocated_size;
+        }
 
         if (record_info->parent_frn != 0ULL && record_info->parent_frn != record_info->frn) {
             MftscanDirNode *parent_node = NULL;
@@ -212,6 +303,72 @@ MftscanError mftscan_ingest_record(MftscanContext *context, MftscanRecordInfo *r
     }
 
     return mftscan_append_file(context, record_info);
+}
+
+MftscanError mftscan_finalize_metadata_tree(MftscanContext *context) {
+    size_t extend_index = SIZE_MAX;
+    size_t index = 0;
+
+    if (context == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    for (index = 0; index < context->directories.count; ++index) {
+        const MftscanDirNode *directory_node = &context->directories.items[index];
+
+        if (directory_node->parent_frn == MFTSCAN_ROOT_FRN &&
+            mftscan_name_equals(directory_node->name, L"$Extend")) {
+            extend_index = index;
+            break;
+        }
+    }
+
+    if (extend_index == SIZE_MAX) {
+        return MFTSCAN_OK;
+    }
+
+    context->directories.items[extend_index].in_metadata_tree = true;
+    for (index = 0; index < context->directories.count; ++index) {
+        MftscanDirNode *directory_node = &context->directories.items[index];
+
+        if (mftscan_directory_is_in_metadata_tree(context, index, context->directories.items[extend_index].frn) &&
+            directory_node->metadata_allocated_size > 0ULL) {
+            directory_node->allocated_size += directory_node->metadata_allocated_size;
+        }
+    }
+
+    for (index = 0; index < context->files.count; ++index) {
+        MftscanFileNode *file_node = &context->files.items[index];
+        size_t parent_index = 0;
+
+        if (!mftscan_map_get(&context->directory_index, file_node->parent_frn, &parent_index)) {
+            continue;
+        }
+
+        if (mftscan_directory_is_in_metadata_tree(context, parent_index, context->directories.items[extend_index].frn)) {
+            uint64_t new_logical_size = file_node->logical_size;
+            uint64_t new_allocated_size = file_node->allocated_size;
+
+            file_node->in_metadata_tree = true;
+            if (file_node->has_metadata_fallback_size) {
+                if (!file_node->has_primary_stream_size && new_logical_size == 0ULL) {
+                    new_logical_size = file_node->metadata_fallback_logical_size;
+                }
+                new_allocated_size += file_node->metadata_fallback_allocated_size;
+                mftscan_adjust_directory_totals(
+                    context,
+                    file_node->parent_frn,
+                    file_node->logical_size,
+                    new_logical_size,
+                    file_node->allocated_size,
+                    new_allocated_size);
+                file_node->logical_size = new_logical_size;
+                file_node->allocated_size = new_allocated_size;
+            }
+        }
+    }
+
+    return MFTSCAN_OK;
 }
 
 MftscanError mftscan_build_results(const MftscanContext *context, const MftscanOptions *options, MftscanScanResult *scan_result) {

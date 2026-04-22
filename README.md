@@ -22,7 +22,7 @@
 - 非叶子目录：目录下面还有子文件夹，不会出现在输出结果里。
 - 目录大小：该叶子目录直属文件的大小总和。
 - 硬链接：按文件 MFT 记录去重，同一个文件实体只统计一次。
-- NTFS 文件大小：优先按未命名 `$DATA` 数据流计算 `logical_size` / `allocated_size`；普通命名 ADS 不计入目录大小。对没有未命名 `$DATA` 的 NTFS 系统记录，会按命名系统流/索引属性兜底计算分配大小。
+- NTFS 文件大小：优先按未命名 `$DATA` 数据流计算 `logical_size` / `allocated_size`；普通命名 ADS 不计入目录大小。对 `$Extend` 元数据子树中没有未命名 `$DATA` 的记录，会按命名系统流/索引属性兜底计算分配大小。
 - NTFS 小文件：`allocated_size` 取决于未命名 `$DATA` 当前是否 resident。resident 时按 `0` 统计；non-resident 时按实际已分配簇统计，所以文件曾经变大后即使逻辑大小缩小，`allocated_size` 也可能仍大于 `0`。
 - NTFS non-resident 分配大小：按 runlist 中真实已分配的 runs 计算；稀疏洞（sparse holes）不计入 `allocated_size`。
 - NTFS 系统目录元数据：系统目录自身的 `$INDEX_ALLOCATION` / `$BITMAP` 等元数据会计入 `allocated_size`，不计入 `logical_size`。

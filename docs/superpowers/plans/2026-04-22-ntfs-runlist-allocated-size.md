@@ -39,7 +39,7 @@
 - Modify: `src/ntfs_record.c`
 - Modify: `src/aggregate.c`
 
-- [ ] Track whether the record is marked `FILE_ATTRIBUTE_SYSTEM`.
+- [ ] Mark records that belong to the `$Extend` metadata subtree using MFT parent/child relationships.
 - [ ] Use named system streams / index metadata only for system records with no unnamed `$DATA`.
 - [ ] Let system directory metadata contribute to `allocated_size` only.
 

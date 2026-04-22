@@ -20,9 +20,11 @@ typedef struct MftscanDirNode {
     wchar_t *name;
     uint64_t logical_size;
     uint64_t allocated_size;
+    uint64_t metadata_allocated_size;
     uint8_t name_priority;
     bool has_child_dir;
     bool metadata_ready;
+    bool in_metadata_tree;
 } MftscanDirNode;
 
 typedef struct MftscanDirVector {
@@ -37,6 +39,11 @@ typedef struct MftscanFileNode {
     wchar_t *name;
     uint64_t logical_size;
     uint64_t allocated_size;
+    uint64_t metadata_fallback_logical_size;
+    uint64_t metadata_fallback_allocated_size;
+    bool has_primary_stream_size;
+    bool has_metadata_fallback_size;
+    bool in_metadata_tree;
 } MftscanFileNode;
 
 typedef struct MftscanFileVector {
@@ -62,12 +69,17 @@ typedef struct MftscanRecordInfo {
     uint64_t parent_frn;
     uint64_t logical_size;
     uint64_t allocated_size;
+    uint64_t metadata_fallback_logical_size;
+    uint64_t metadata_fallback_allocated_size;
+    uint64_t directory_metadata_allocated_size;
     wchar_t *name;
     uint8_t name_priority;
     bool has_data_size;
+    bool has_primary_stream_size;
+    bool has_metadata_fallback_size;
+    bool has_directory_metadata_size;
     bool in_use;
     bool is_directory;
-    bool is_system;
 } MftscanRecordInfo;
 
 typedef struct MftscanVolumeHandle {
@@ -119,6 +131,7 @@ MftscanError mftscan_parse_file_record(
     uint64_t record_number,
     MftscanRecordInfo *record_info);
 MftscanError mftscan_ingest_record(MftscanContext *context, MftscanRecordInfo *record_info);
+MftscanError mftscan_finalize_metadata_tree(MftscanContext *context);
 MftscanError mftscan_build_path(const MftscanContext *context, uint64_t directory_frn, wchar_t **path_text);
 
 #endif

@@ -41,6 +41,9 @@ int wmain(int argc, wchar_t **argv) {
     mftscan_context_init(&context);
 
     error_code = mftscan_scan_volume(&context, &options);
+    if (error_code == MFTSCAN_OK) {
+        error_code = mftscan_finalize_metadata_tree(&context);
+    }
     if (error_code == MFTSCAN_OK && !options.output_all) {
         error_code = mftscan_build_results(&context, &options, &scan_result);
     }
