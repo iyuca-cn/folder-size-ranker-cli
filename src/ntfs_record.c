@@ -284,7 +284,7 @@ static MftscanError mftscan_capture_data_size_candidate(
             return MFTSCAN_ERROR_MFT_PARSE;
         }
 
-        mftscan_set_data_size_candidate(candidate, resident_header->value_length, resident_header->value_length);
+        mftscan_set_data_size_candidate(candidate, resident_header->value_length, 0ULL);
         return MFTSCAN_OK;
     }
 
