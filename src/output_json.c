@@ -22,6 +22,11 @@ typedef struct MftscanAllTree {
     size_t root_index;
 } MftscanAllTree;
 
+typedef struct MftscanAllFilteredFileTotals {
+    uint64_t logical_size;
+    uint64_t allocated_size;
+} MftscanAllFilteredFileTotals;
+
 typedef struct MftscanAllSortContext {
     const MftscanContext *context;
     const MftscanOptions *options;
@@ -43,6 +48,14 @@ static uint64_t mftscan_all_file_sort_value(const MftscanOptions *options, const
 static bool mftscan_all_directory_ready(const MftscanDirNode *directory_node) {
     return directory_node != NULL &&
         (directory_node->metadata_ready || directory_node->frn == MFTSCAN_ROOT_FRN);
+}
+
+static bool mftscan_all_file_visible(const MftscanOptions *options, const MftscanFileNode *file_node) {
+    if (options == NULL || file_node == NULL) {
+        return false;
+    }
+
+    return mftscan_all_file_sort_value(options, file_node) >= options->min_size;
 }
 
 static int __cdecl mftscan_compare_all_children(void *context, const void *left_value, const void *right_value) {
@@ -387,6 +400,79 @@ static MftscanError mftscan_all_sort_children(
     return MFTSCAN_OK;
 }
 
+static MftscanError mftscan_all_recompute_filtered_totals(
+    const MftscanContext *context,
+    const MftscanOptions *options,
+    MftscanAllTree *tree) {
+    MftscanAllFilteredFileTotals *direct_file_totals = NULL;
+    size_t index = 0;
+
+    if (context == NULL || options == NULL || tree == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    direct_file_totals = (MftscanAllFilteredFileTotals *)calloc(tree->count, sizeof(MftscanAllFilteredFileTotals));
+    if (direct_file_totals == NULL) {
+        return MFTSCAN_ERROR_OUT_OF_MEMORY;
+    }
+
+    memset(tree->logical_totals, 0, tree->count * sizeof(uint64_t));
+    memset(tree->allocated_totals, 0, tree->count * sizeof(uint64_t));
+
+    for (index = 0; index < tree->count; ++index) {
+        size_t file_position = 0;
+        size_t emitted_file_count = 0;
+
+        for (file_position = tree->file_offsets[index];
+             file_position < tree->file_offsets[index + 1U];
+             ++file_position) {
+            size_t file_index = tree->file_indices[file_position];
+            const MftscanFileNode *file_node = &context->files.items[file_index];
+
+            if (!mftscan_all_file_visible(options, file_node)) {
+                break;
+            }
+            if (options->has_limit && emitted_file_count >= options->limit) {
+                break;
+            }
+
+            direct_file_totals[index].logical_size += file_node->logical_size;
+            direct_file_totals[index].allocated_size += file_node->allocated_size;
+            emitted_file_count += 1U;
+        }
+    }
+
+    for (index = 0; index < tree->count; ++index) {
+        uint64_t logical_size = direct_file_totals[index].logical_size;
+        uint64_t allocated_size = direct_file_totals[index].allocated_size;
+        size_t current_index = index;
+        size_t guard_count = 0;
+
+        if (logical_size == 0ULL && allocated_size == 0ULL) {
+            continue;
+        }
+
+        tree->logical_totals[current_index] += logical_size;
+        tree->allocated_totals[current_index] += allocated_size;
+
+        while (tree->parent_indices[current_index] != MFTSCAN_NO_INDEX) {
+            size_t parent_index = tree->parent_indices[current_index];
+
+            tree->logical_totals[parent_index] += logical_size;
+            tree->allocated_totals[parent_index] += allocated_size;
+            current_index = parent_index;
+            guard_count += 1U;
+            if (guard_count > tree->count) {
+                free(direct_file_totals);
+                return MFTSCAN_ERROR_INTERNAL;
+            }
+        }
+    }
+
+    free(direct_file_totals);
+    return MFTSCAN_OK;
+}
+
 static MftscanError mftscan_all_add_wide_string(
     yyjson_mut_doc *document,
     yyjson_mut_val *object,
@@ -655,6 +741,16 @@ MftscanError mftscan_output_all_json(const MftscanOptions *options, const Mftsca
     tree.root_index = MFTSCAN_NO_INDEX;
 
     error_code = mftscan_all_tree_build(context, options, &tree);
+    if (error_code != MFTSCAN_OK) {
+        goto cleanup;
+    }
+
+    error_code = mftscan_all_sort_children(context, options, &tree);
+    if (error_code != MFTSCAN_OK) {
+        goto cleanup;
+    }
+
+    error_code = mftscan_all_recompute_filtered_totals(context, options, &tree);
     if (error_code != MFTSCAN_OK) {
         goto cleanup;
     }
