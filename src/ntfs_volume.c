@@ -106,6 +106,8 @@ MftscanError mftscan_open_volume(const MftscanOptions *options, MftscanVolumeHan
     volume_handle->bytes_per_sector = volume_data.BytesPerSector;
     volume_handle->bytes_per_cluster = volume_data.BytesPerCluster;
     volume_handle->bytes_per_file_record = volume_data.BytesPerFileRecordSegment;
+    volume_handle->mft_start_lcn = (uint64_t)volume_data.MftStartLcn.QuadPart;
+    volume_handle->mft_valid_data_length = (uint64_t)volume_data.MftValidDataLength.QuadPart;
     record_count = (ULONGLONG)(volume_data.MftValidDataLength.QuadPart / volume_data.BytesPerFileRecordSegment);
     volume_handle->highest_record_number = (record_count > 0ULL) ? (uint64_t)(record_count - 1ULL) : 0ULL;
     return MFTSCAN_OK;

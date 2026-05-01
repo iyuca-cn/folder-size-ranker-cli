@@ -189,6 +189,7 @@
     <ClCompile Include="src\main.c" />
     <ClCompile Include="src\ntfs_mft.c" />
     <ClCompile Include="src\ntfs_record.c" />
+    <ClCompile Include="src\ntfs_stream.c" />
     <ClCompile Include="src\ntfs_volume.c" />
     <ClCompile Include="src\output_json.c" />
     <ClCompile Include="src\output_table.c" />

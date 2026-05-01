@@ -188,17 +188,36 @@ static bool mftscan_is_metadata_tree_directory_self_attribute(const MftscanNtfsA
         attribute_header->type == MFTSCAN_ATTRIBUTE_BITMAP;
 }
 
-static MftscanError mftscan_apply_update_sequence_array(uint8_t *record_buffer, size_t record_length, uint32_t bytes_per_sector) {
+MftscanError mftscan_apply_update_sequence_array(
+    uint8_t *record_buffer,
+    size_t record_length,
+    uint32_t bytes_per_sector,
+    bool *torn_write) {
     MftscanNtfsFileRecordHeader *header = (MftscanNtfsFileRecordHeader *)record_buffer;
     WORD *update_sequence_words = NULL;
     WORD update_sequence_number = 0;
     WORD sector_index = 0;
+    WORD expected_count = 0;
 
+    if (torn_write != NULL) {
+        *torn_write = false;
+    }
     if (record_length < sizeof(MftscanNtfsFileRecordHeader) || bytes_per_sector < sizeof(WORD) * 2U) {
         return MFTSCAN_ERROR_MFT_PARSE;
     }
 
-    if (header->update_sequence_offset + header->update_sequence_count * sizeof(WORD) > record_length) {
+    if (header->update_sequence_offset < sizeof(MftscanNtfsFileRecordHeader) ||
+        header->update_sequence_count == 0U ||
+        header->update_sequence_offset + header->update_sequence_count * sizeof(WORD) > record_length) {
+        return MFTSCAN_ERROR_MFT_PARSE;
+    }
+
+    expected_count = (WORD)((record_length / bytes_per_sector) + 1U);
+    if (header->update_sequence_count != expected_count) {
+        mftscan_set_error_detail(
+            "USA 计数 %u 与扇区数不一致 (期望 %u)",
+            (unsigned int)header->update_sequence_count,
+            (unsigned int)expected_count);
         return MFTSCAN_ERROR_MFT_PARSE;
     }
 
@@ -214,7 +233,15 @@ static MftscanError mftscan_apply_update_sequence_array(uint8_t *record_buffer, 
 
         sector_trailer = (WORD *)(record_buffer + fixup_offset);
         if (*sector_trailer != update_sequence_number) {
-            return MFTSCAN_OK;
+            if (torn_write != NULL) {
+                *torn_write = true;
+            }
+            mftscan_set_error_detail(
+                "USA 校验失败：扇区 %u 尾部 0x%04x 与 USN 0x%04x 不一致",
+                (unsigned int)sector_index,
+                (unsigned int)*sector_trailer,
+                (unsigned int)update_sequence_number);
+            return MFTSCAN_ERROR_MFT_PARSE;
         }
 
         *sector_trailer = update_sequence_words[sector_index];
@@ -224,13 +251,26 @@ static MftscanError mftscan_apply_update_sequence_array(uint8_t *record_buffer, 
 }
 
 static bool mftscan_record_layout_is_valid(const MftscanNtfsFileRecordHeader *header, size_t record_length) {
-    if (header == NULL) {
+    if (header == NULL || record_length < sizeof(MftscanNtfsFileRecordHeader)) {
         return false;
     }
 
-    return header->first_attribute_offset >= sizeof(MftscanNtfsFileRecordHeader) &&
-        header->first_attribute_offset <= header->used_size &&
-        header->used_size <= record_length;
+    if ((header->first_attribute_offset & 0x07U) != 0U) {
+        return false;
+    }
+    if (header->first_attribute_offset < sizeof(MftscanNtfsFileRecordHeader) ||
+        header->first_attribute_offset > header->used_size ||
+        header->used_size > record_length) {
+        return false;
+    }
+    if (header->allocated_size > record_length) {
+        return false;
+    }
+    if (header->used_size < (DWORD)header->first_attribute_offset + sizeof(DWORD) * 2U) {
+        return false;
+    }
+
+    return true;
 }
 
 static bool mftscan_attribute_name_is_valid(
@@ -386,74 +426,146 @@ static MftscanError mftscan_capture_file_name(
 static uint64_t mftscan_read_unsigned_le(const uint8_t *bytes, size_t byte_count);
 static int64_t mftscan_read_signed_le(const uint8_t *bytes, size_t byte_count);
 
+MftscanError mftscan_iterate_mapping_pairs(
+    const uint8_t *mapping_pairs,
+    size_t mapping_pairs_length,
+    MftscanRunlistCallback callback,
+    void *user_data) {
+    const uint8_t *cursor = mapping_pairs;
+    const uint8_t *end = mapping_pairs + mapping_pairs_length;
+    int64_t current_lcn = 0;
+
+    if (mapping_pairs == NULL || callback == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    while (cursor < end) {
+        BYTE run_header = *cursor++;
+        size_t length_size = 0;
+        size_t offset_size = 0;
+        uint64_t cluster_count = 0ULL;
+        bool sparse = false;
+        uint64_t starting_lcn = 0ULL;
+        MftscanError error_code = MFTSCAN_OK;
+
+        if (run_header == 0U) {
+            return MFTSCAN_OK;
+        }
+
+        length_size = run_header & 0x0FU;
+        offset_size = run_header >> 4U;
+        if (length_size == 0U || length_size > 8U || offset_size > 8U ||
+            cursor + length_size + offset_size > end) {
+            return MFTSCAN_ERROR_MFT_PARSE;
+        }
+
+        cluster_count = mftscan_read_unsigned_le(cursor, length_size);
+        cursor += length_size;
+        if (cluster_count == 0ULL) {
+            return MFTSCAN_ERROR_MFT_PARSE;
+        }
+
+        if (offset_size == 0U) {
+            sparse = true;
+        } else {
+            int64_t lcn_delta = mftscan_read_signed_le(cursor, offset_size);
+            current_lcn += lcn_delta;
+            if (current_lcn < 0) {
+                return MFTSCAN_ERROR_MFT_PARSE;
+            }
+            starting_lcn = (uint64_t)current_lcn;
+        }
+        cursor += offset_size;
+
+        error_code = callback(user_data, cluster_count, starting_lcn, sparse);
+        if (error_code != MFTSCAN_OK) {
+            return error_code;
+        }
+    }
+
+    /* Reached end of mapping pairs buffer without an explicit terminator. */
+    return MFTSCAN_ERROR_MFT_PARSE;
+}
+
+static MftscanError mftscan_runlist_bounds_for_attribute(
+    const MftscanNtfsNonResidentAttributeHeader *non_resident_header,
+    size_t attribute_length,
+    const uint8_t **mapping_pairs_out,
+    size_t *mapping_pairs_length_out) {
+    if (non_resident_header == NULL || mapping_pairs_out == NULL || mapping_pairs_length_out == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+    if (sizeof(MftscanNtfsNonResidentAttributeHeader) > attribute_length ||
+        non_resident_header->mapping_pairs_offset < sizeof(MftscanNtfsNonResidentAttributeHeader) ||
+        non_resident_header->mapping_pairs_offset >= attribute_length) {
+        return MFTSCAN_ERROR_MFT_PARSE;
+    }
+    *mapping_pairs_out = (const uint8_t *)non_resident_header + non_resident_header->mapping_pairs_offset;
+    *mapping_pairs_length_out = attribute_length - non_resident_header->mapping_pairs_offset;
+    return MFTSCAN_OK;
+}
+
+typedef struct MftscanAllocatedSizeAccumulator {
+    uint32_t bytes_per_cluster;
+    uint64_t allocated_size;
+} MftscanAllocatedSizeAccumulator;
+
+static MftscanError mftscan_accumulate_allocated_size_callback(
+    void *user_data,
+    uint64_t cluster_count,
+    uint64_t starting_lcn,
+    bool sparse) {
+    MftscanAllocatedSizeAccumulator *accumulator = (MftscanAllocatedSizeAccumulator *)user_data;
+    uint64_t run_size = 0ULL;
+
+    (void)starting_lcn;
+    if (sparse) {
+        return MFTSCAN_OK;
+    }
+    if (cluster_count > UINT64_MAX / accumulator->bytes_per_cluster) {
+        return MFTSCAN_ERROR_MFT_PARSE;
+    }
+    run_size = cluster_count * accumulator->bytes_per_cluster;
+    if (accumulator->allocated_size > UINT64_MAX - run_size) {
+        return MFTSCAN_ERROR_MFT_PARSE;
+    }
+    accumulator->allocated_size += run_size;
+    return MFTSCAN_OK;
+}
+
 static MftscanError mftscan_calculate_nonresident_allocated_size(
     const MftscanVolumeHandle *volume_handle,
     const MftscanNtfsNonResidentAttributeHeader *non_resident_header,
     size_t attribute_length,
     uint64_t *allocated_size) {
-    const uint8_t *mapping_pair = NULL;
-    const uint8_t *mapping_end = NULL;
-    int64_t current_lcn = 0;
-    bool saw_terminator = false;
+    const uint8_t *mapping_pairs = NULL;
+    size_t mapping_pairs_length = 0;
+    MftscanAllocatedSizeAccumulator accumulator = { 0 };
+    MftscanError error_code = MFTSCAN_OK;
 
-    if (volume_handle == NULL || non_resident_header == NULL || allocated_size == NULL) {
+    if (volume_handle == NULL || allocated_size == NULL) {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
     }
-
-    if (volume_handle->bytes_per_cluster == 0U ||
-        sizeof(MftscanNtfsNonResidentAttributeHeader) > attribute_length ||
-        non_resident_header->mapping_pairs_offset >= attribute_length) {
+    if (volume_handle->bytes_per_cluster == 0U) {
         return MFTSCAN_ERROR_MFT_PARSE;
     }
 
-    *allocated_size = 0ULL;
-    mapping_pair = (const uint8_t *)non_resident_header + non_resident_header->mapping_pairs_offset;
-    mapping_end = (const uint8_t *)non_resident_header + attribute_length;
-    while (mapping_pair < mapping_end) {
-        BYTE run_header = *mapping_pair++;
-        size_t length_size = 0;
-        size_t offset_size = 0;
-        uint64_t cluster_count = 0ULL;
-
-        if (run_header == 0U) {
-            saw_terminator = true;
-            break;
-        }
-
-        length_size = run_header & 0x0FU;
-        offset_size = run_header >> 4U;
-        if (length_size == 0U || mapping_pair + length_size + offset_size > mapping_end) {
-            return MFTSCAN_ERROR_MFT_PARSE;
-        }
-
-        cluster_count = mftscan_read_unsigned_le(mapping_pair, length_size);
-        mapping_pair += length_size;
-        if (cluster_count == 0ULL) {
-            return MFTSCAN_ERROR_MFT_PARSE;
-        }
-
-        if (offset_size != 0U) {
-            int64_t lcn_delta = mftscan_read_signed_le(mapping_pair, offset_size);
-            uint64_t run_allocated_size = 0ULL;
-
-            current_lcn += lcn_delta;
-            if (current_lcn < 0) {
-                return MFTSCAN_ERROR_MFT_PARSE;
-            }
-
-            if (cluster_count > UINT64_MAX / volume_handle->bytes_per_cluster) {
-                return MFTSCAN_ERROR_MFT_PARSE;
-            }
-            run_allocated_size = cluster_count * volume_handle->bytes_per_cluster;
-            if (*allocated_size > UINT64_MAX - run_allocated_size) {
-                return MFTSCAN_ERROR_MFT_PARSE;
-            }
-            *allocated_size += run_allocated_size;
-        }
-        mapping_pair += offset_size;
+    error_code = mftscan_runlist_bounds_for_attribute(
+        non_resident_header, attribute_length, &mapping_pairs, &mapping_pairs_length);
+    if (error_code != MFTSCAN_OK) {
+        return error_code;
     }
 
-    return saw_terminator ? MFTSCAN_OK : MFTSCAN_ERROR_MFT_PARSE;
+    accumulator.bytes_per_cluster = volume_handle->bytes_per_cluster;
+    error_code = mftscan_iterate_mapping_pairs(
+        mapping_pairs, mapping_pairs_length,
+        mftscan_accumulate_allocated_size_callback, &accumulator);
+    if (error_code != MFTSCAN_OK) {
+        return error_code;
+    }
+
+    *allocated_size = accumulator.allocated_size;
+    return MFTSCAN_OK;
 }
 
 static bool mftscan_nonresident_attribute_uses_runlist_allocated_size(
@@ -694,35 +806,91 @@ static int64_t mftscan_read_signed_le(const uint8_t *bytes, size_t byte_count) {
     return (int64_t)value;
 }
 
+typedef struct MftscanCopyValueState {
+    const MftscanVolumeHandle *volume_handle;
+    uint8_t *output;
+    size_t output_capacity;
+    size_t output_offset;
+    uint8_t *cluster_buffer;
+} MftscanCopyValueState;
+
+static MftscanError mftscan_copy_value_callback(
+    void *user_data,
+    uint64_t cluster_count,
+    uint64_t starting_lcn,
+    bool sparse) {
+    MftscanCopyValueState *state = (MftscanCopyValueState *)user_data;
+    uint64_t cluster_index = 0ULL;
+    uint32_t bytes_per_cluster = state->volume_handle->bytes_per_cluster;
+
+    for (cluster_index = 0ULL;
+        cluster_index < cluster_count && state->output_offset < state->output_capacity;
+        ++cluster_index) {
+        size_t copy_size = bytes_per_cluster;
+        if (state->output_capacity - state->output_offset < copy_size) {
+            copy_size = state->output_capacity - state->output_offset;
+        }
+
+        if (sparse) {
+            memset(state->output + state->output_offset, 0, copy_size);
+        } else {
+            uint64_t absolute_lcn = 0ULL;
+            uint64_t byte_offset = 0ULL;
+            MftscanError error_code = MFTSCAN_OK;
+
+            if (starting_lcn > UINT64_MAX - cluster_index) {
+                return MFTSCAN_ERROR_MFT_PARSE;
+            }
+            absolute_lcn = starting_lcn + cluster_index;
+            if (absolute_lcn > UINT64_MAX / bytes_per_cluster) {
+                return MFTSCAN_ERROR_MFT_PARSE;
+            }
+            byte_offset = absolute_lcn * bytes_per_cluster;
+
+            error_code = mftscan_read_volume_bytes(
+                state->volume_handle,
+                byte_offset,
+                state->cluster_buffer,
+                bytes_per_cluster);
+            if (error_code != MFTSCAN_OK) {
+                return error_code;
+            }
+            memcpy(state->output + state->output_offset, state->cluster_buffer, copy_size);
+        }
+
+        state->output_offset += copy_size;
+    }
+
+    return MFTSCAN_OK;
+}
+
 static MftscanError mftscan_copy_nonresident_attribute_value(
     const MftscanVolumeHandle *volume_handle,
     const MftscanNtfsNonResidentAttributeHeader *non_resident_header,
     size_t attribute_length,
     uint8_t **value_data,
     size_t *value_length) {
-    const uint8_t *mapping_pair = NULL;
-    const uint8_t *mapping_end = NULL;
+    const uint8_t *mapping_pairs = NULL;
+    size_t mapping_pairs_length = 0;
+    MftscanCopyValueState state = { 0 };
     uint8_t *copied_value = NULL;
     uint8_t *cluster_buffer = NULL;
-    size_t output_offset = 0;
-    int64_t current_lcn = 0;
     MftscanError error_code = MFTSCAN_OK;
 
-    if (volume_handle == NULL ||
-        non_resident_header == NULL ||
-        value_data == NULL ||
-        value_length == NULL) {
+    if (volume_handle == NULL || value_data == NULL || value_length == NULL) {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
     }
-
-    if (volume_handle->bytes_per_cluster == 0U ||
-        sizeof(MftscanNtfsNonResidentAttributeHeader) > attribute_length ||
-        non_resident_header->mapping_pairs_offset >= attribute_length) {
+    if (volume_handle->bytes_per_cluster == 0U) {
         return MFTSCAN_ERROR_MFT_PARSE;
     }
-
     if (non_resident_header->data_size > SIZE_MAX) {
         return MFTSCAN_ERROR_OUT_OF_MEMORY;
+    }
+
+    error_code = mftscan_runlist_bounds_for_attribute(
+        non_resident_header, attribute_length, &mapping_pairs, &mapping_pairs_length);
+    if (error_code != MFTSCAN_OK) {
+        return error_code;
     }
 
     *value_data = NULL;
@@ -735,95 +903,25 @@ static MftscanError mftscan_copy_nonresident_attribute_value(
     if (copied_value == NULL) {
         return MFTSCAN_ERROR_OUT_OF_MEMORY;
     }
-
     cluster_buffer = (uint8_t *)malloc(volume_handle->bytes_per_cluster);
     if (cluster_buffer == NULL) {
         free(copied_value);
         return MFTSCAN_ERROR_OUT_OF_MEMORY;
     }
 
-    mapping_pair = (const uint8_t *)non_resident_header + non_resident_header->mapping_pairs_offset;
-    mapping_end = (const uint8_t *)non_resident_header + attribute_length;
-    while (mapping_pair < mapping_end && output_offset < (size_t)non_resident_header->data_size) {
-        BYTE run_header = *mapping_pair++;
-        size_t length_size = 0;
-        size_t offset_size = 0;
-        uint64_t cluster_count = 0ULL;
-        int64_t lcn_delta = 0;
-        uint64_t cluster_index = 0ULL;
+    state.volume_handle = volume_handle;
+    state.output = copied_value;
+    state.output_capacity = (size_t)non_resident_header->data_size;
+    state.output_offset = 0;
+    state.cluster_buffer = cluster_buffer;
 
-        if (run_header == 0U) {
-            break;
-        }
-
-        length_size = run_header & 0x0FU;
-        offset_size = run_header >> 4U;
-        if (length_size == 0U || mapping_pair + length_size + offset_size > mapping_end) {
-            error_code = MFTSCAN_ERROR_MFT_PARSE;
-            goto cleanup;
-        }
-
-        cluster_count = mftscan_read_unsigned_le(mapping_pair, length_size);
-        mapping_pair += length_size;
-        lcn_delta = mftscan_read_signed_le(mapping_pair, offset_size);
-        mapping_pair += offset_size;
-        if (cluster_count == 0ULL) {
-            error_code = MFTSCAN_ERROR_MFT_PARSE;
-            goto cleanup;
-        }
-
-        if (offset_size != 0U) {
-            current_lcn += lcn_delta;
-            if (current_lcn < 0) {
-                error_code = MFTSCAN_ERROR_MFT_PARSE;
-                goto cleanup;
-            }
-        }
-
-        for (cluster_index = 0ULL;
-            cluster_index < cluster_count && output_offset < (size_t)non_resident_header->data_size;
-            ++cluster_index) {
-            size_t copy_size = volume_handle->bytes_per_cluster;
-
-            if ((size_t)non_resident_header->data_size - output_offset < copy_size) {
-                copy_size = (size_t)non_resident_header->data_size - output_offset;
-            }
-
-            if (offset_size == 0U) {
-                memset(copied_value + output_offset, 0, copy_size);
-            } else {
-                uint64_t absolute_lcn = 0ULL;
-                uint64_t byte_offset = 0ULL;
-
-                if ((uint64_t)current_lcn > UINT64_MAX - cluster_index) {
-                    error_code = MFTSCAN_ERROR_MFT_PARSE;
-                    goto cleanup;
-                }
-
-                absolute_lcn = (uint64_t)current_lcn + cluster_index;
-                if (absolute_lcn > UINT64_MAX / volume_handle->bytes_per_cluster) {
-                    error_code = MFTSCAN_ERROR_MFT_PARSE;
-                    goto cleanup;
-                }
-
-                byte_offset = absolute_lcn * volume_handle->bytes_per_cluster;
-                error_code = mftscan_read_volume_bytes(
-                    volume_handle,
-                    byte_offset,
-                    cluster_buffer,
-                    volume_handle->bytes_per_cluster);
-                if (error_code != MFTSCAN_OK) {
-                    goto cleanup;
-                }
-
-                memcpy(copied_value + output_offset, cluster_buffer, copy_size);
-            }
-
-            output_offset += copy_size;
-        }
+    error_code = mftscan_iterate_mapping_pairs(
+        mapping_pairs, mapping_pairs_length,
+        mftscan_copy_value_callback, &state);
+    if (error_code != MFTSCAN_OK) {
+        goto cleanup;
     }
-
-    if (output_offset != (size_t)non_resident_header->data_size) {
+    if (state.output_offset != state.output_capacity) {
         error_code = MFTSCAN_ERROR_MFT_PARSE;
         goto cleanup;
     }
@@ -973,15 +1071,7 @@ static MftscanError mftscan_find_attribute_size_in_record(
         goto cleanup;
     }
 
-    error_code = mftscan_apply_update_sequence_array(
-        output_buffer->FileRecordBuffer,
-        volume_handle->bytes_per_file_record,
-        volume_handle->bytes_per_sector);
-    if (error_code != MFTSCAN_OK) {
-        mftscan_set_error_detail("attribute list 指向的 FRN %llu USA 修复失败", (unsigned long long)segment_frn);
-        goto cleanup;
-    }
-
+    /* IOCTL output already has USA applied by the kernel. Trust the buffer. */
     header = (MftscanNtfsFileRecordHeader *)output_buffer->FileRecordBuffer;
     if (header->signature != MFTSCAN_FILE_RECORD_SIGNATURE ||
         (header->flags & 0x0001U) == 0U ||
@@ -1212,14 +1302,23 @@ MftscanError mftscan_parse_file_record(
     memset(record_info, 0, sizeof(*record_info));
     record_info->frn = record_number & MFTSCAN_FRN_MASK;
 
-    error_code = mftscan_apply_update_sequence_array(record_buffer, record_length, volume_handle->bytes_per_sector);
-    if (error_code != MFTSCAN_OK) {
-        mftscan_set_error_detail("FRN %llu USA 修复失败", (unsigned long long)record_info->frn);
+    if (record_length < sizeof(MftscanNtfsFileRecordHeader)) {
+        mftscan_set_error_detail("FRN %llu 记录长度过短", (unsigned long long)record_info->frn);
+        error_code = MFTSCAN_ERROR_MFT_PARSE;
         goto cleanup;
     }
 
+    /* Caller is responsible for delivering a USA-fixed-up buffer. Streaming
+     * reads cover every MFT slot, so we will encounter unallocated slots (all
+     * zero) and corruption markers ("BAAD"). Treat anything that is not a FILE
+     * record as not-in-use and skip cleanly instead of failing the whole scan. */
     header = (MftscanNtfsFileRecordHeader *)record_buffer;
-    if (header->signature != MFTSCAN_FILE_RECORD_SIGNATURE || !mftscan_record_layout_is_valid(header, record_length)) {
+    if (header->signature != MFTSCAN_FILE_RECORD_SIGNATURE) {
+        record_info->in_use = false;
+        goto cleanup;
+    }
+
+    if (!mftscan_record_layout_is_valid(header, record_length)) {
         mftscan_set_error_detail("FRN %llu 记录头非法", (unsigned long long)record_info->frn);
         error_code = MFTSCAN_ERROR_MFT_PARSE;
         goto cleanup;

@@ -38,3 +38,6 @@ Thumbs.db
 Desktop.ini
 *.swp
 *.tmp
+
+# Local build/test scratch
+build/

@@ -97,15 +97,16 @@ MftscanError mftscan_read_volume_bytes(
 
 MftscanError mftscan_scan_volume_ntfs(MftscanContext *context, const MftscanOptions *options) {
     MftscanVolumeHandle volume_handle;
-    NTFS_FILE_RECORD_OUTPUT_BUFFER *output_buffer = NULL;
-    size_t output_buffer_size = 0;
-    uint64_t request_record = 0;
+    MftscanRecordStream stream;
+    uint64_t total_records = 0ULL;
+    uint64_t current_record = 0ULL;
     MftscanError error_code = MFTSCAN_OK;
 
     if (context == NULL || options == NULL) {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
     }
 
+    memset(&stream, 0, sizeof(stream));
     context->volume[0] = options->volume[0];
     context->volume[1] = options->volume[1];
     context->volume[2] = L'\0';
@@ -118,49 +119,42 @@ MftscanError mftscan_scan_volume_ntfs(MftscanContext *context, const MftscanOpti
 
     context->bytes_per_cluster = volume_handle.bytes_per_cluster;
 
-    output_buffer_size = offsetof(NTFS_FILE_RECORD_OUTPUT_BUFFER, FileRecordBuffer) + volume_handle.bytes_per_file_record;
-    output_buffer = (NTFS_FILE_RECORD_OUTPUT_BUFFER *)malloc(output_buffer_size);
-    if (output_buffer == NULL) {
+    error_code = mftscan_record_stream_open(&volume_handle, &stream);
+    if (error_code != MFTSCAN_OK) {
         mftscan_close_volume(&volume_handle);
-        return MFTSCAN_ERROR_OUT_OF_MEMORY;
+        return error_code;
     }
 
-    request_record = volume_handle.highest_record_number;
-    for (;;) {
-        MftscanRecordInfo record_info;
-        uint64_t actual_record = 0;
-        bool reached_end = false;
-        size_t file_record_length = 0;
+    total_records = stream.total_records;
+    if (total_records == 0ULL) {
+        total_records = volume_handle.highest_record_number + 1ULL;
+    }
 
-        error_code = mftscan_read_file_record(
-            &volume_handle,
-            request_record,
-            output_buffer,
-            output_buffer_size,
-            &actual_record,
-            &reached_end);
+    for (current_record = 0ULL; current_record < total_records; ++current_record) {
+        MftscanRecordInfo record_info;
+        uint8_t *record_buffer = NULL;
+        size_t record_length = 0;
+        bool available = false;
+
+        error_code = mftscan_record_stream_get(
+            &stream, current_record, &record_buffer, &record_length, &available);
         if (error_code != MFTSCAN_OK) {
             goto cleanup;
         }
-        if (reached_end) {
-            break;
+        if (!available) {
+            continue;
         }
 
-        if (actual_record > request_record) {
-            error_code = MFTSCAN_ERROR_MFT_ENUM;
-            goto cleanup;
-        }
-
-        file_record_length = volume_handle.bytes_per_file_record;
         error_code = mftscan_parse_file_record(
             &volume_handle,
-            output_buffer->FileRecordBuffer,
-            file_record_length,
-            actual_record,
+            record_buffer,
+            record_length,
+            current_record,
             &record_info);
         if (error_code != MFTSCAN_OK) {
             if (mftscan_error_detail()[0] == '\0') {
-                mftscan_set_error_detail("解析 FRN %llu 失败", (unsigned long long)actual_record);
+                mftscan_set_error_detail(
+                    "解析 FRN %llu 失败", (unsigned long long)current_record);
             }
             goto cleanup;
         }
@@ -172,16 +166,11 @@ MftscanError mftscan_scan_volume_ntfs(MftscanContext *context, const MftscanOpti
                 goto cleanup;
             }
         }
-
         mftscan_free_record_info(&record_info);
-        if (actual_record == 0ULL) {
-            break;
-        }
-        request_record = actual_record - 1ULL;
     }
 
 cleanup:
-    free(output_buffer);
+    mftscan_record_stream_close(&stream);
     mftscan_close_volume(&volume_handle);
     return error_code;
 }
