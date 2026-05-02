@@ -21,8 +21,8 @@
 - 叶子目录：目录下面没有任何子文件夹。
 - 非叶子目录：目录下面还有子文件夹，不会出现在输出结果里。
 - 目录大小：该叶子目录直属文件的大小总和。
-- 硬链接：按文件 MFT 记录去重，同一个文件实体只统计一次。
-- 资源管理器口径差异：文件资源管理器通常按目录项累计硬链接；因此像 `C:\Program Files\WindowsApps` 这类包含硬链接的目录，资源管理器总量可能仍略高于本工具。
+- 硬链接：按目录项统计。NTFS 快路径会读取同一 MFT 记录上的多个 `$FILE_NAME` 链接，并把每个可见硬链接计入它所在的父目录；DOS-only 8.3 别名不作为额外目录项统计。
+- 资源管理器口径差异：目录大小接近资源管理器按路径枚举的口径；如果用“唯一文件实体”或卷级物理占用口径对比，包含大量硬链接的目录会出现差异。
 - NTFS 文件大小：优先按未命名 `$DATA` 数据流计算 `logical_size` / `allocated_size`；普通命名 ADS 不计入目录大小。WOF 压缩文件会把 `:WofCompressedData` 命名流作为 `allocated_size` 兜底；对 `$Secure` 及 `$Extend` 元数据子树中没有未命名 `$DATA` 的记录，会按命名系统流/索引属性兜底计算分配大小。
 - NTFS 小文件：`allocated_size` 取决于未命名 `$DATA` 当前是否 resident。resident 时按 `0` 统计；non-resident 时按实际已分配簇统计，所以文件曾经变大后即使逻辑大小缩小，`allocated_size` 也可能仍大于 `0`。
 - NTFS non-resident 分配大小：普通流使用属性头里的 `allocated_size`；压缩/稀疏流按 runlist 中真实已分配的 runs 计算，稀疏洞（sparse holes）不计入 `allocated_size`。

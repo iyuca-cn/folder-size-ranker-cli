@@ -235,14 +235,6 @@ MftscanError mftscan_map_put(MftscanUint64Map *map, uint64_t key, size_t value) 
     return MFTSCAN_OK;
 }
 
-bool mftscan_set_contains(const MftscanUint64Map *set_map, uint64_t key) {
-    return mftscan_map_get(set_map, key, NULL);
-}
-
-MftscanError mftscan_set_add(MftscanUint64Map *set_map, uint64_t key) {
-    return mftscan_map_put(set_map, key, 1U);
-}
-
 void mftscan_map_free(MftscanUint64Map *map) {
     free(map->entries);
     map->entries = NULL;
@@ -251,11 +243,17 @@ void mftscan_map_free(MftscanUint64Map *map) {
 }
 
 void mftscan_free_record_info(MftscanRecordInfo *record_info) {
+    size_t index = 0;
+
     if (record_info == NULL) {
         return;
     }
 
     free(record_info->name);
+    for (index = 0; index < record_info->file_name_link_count; ++index) {
+        free(record_info->file_name_links[index].name);
+    }
+    free(record_info->file_name_links);
     memset(record_info, 0, sizeof(*record_info));
 }
 

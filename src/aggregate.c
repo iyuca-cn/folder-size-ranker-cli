@@ -37,12 +37,19 @@ static MftscanError mftscan_ensure_directory(MftscanContext *context, uint64_t f
     return MFTSCAN_OK;
 }
 
-static MftscanError mftscan_append_file(MftscanContext *context, MftscanRecordInfo *record_info) {
+static MftscanError mftscan_append_file(
+    MftscanContext *context,
+    MftscanRecordInfo *record_info,
+    uint64_t parent_frn,
+    wchar_t **name) {
     size_t file_index = 0;
     MftscanFileNode *grown_items = NULL;
 
-    if (context == NULL || record_info == NULL) {
+    if (context == NULL || record_info == NULL || name == NULL) {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+    if (*name == NULL || (*name)[0] == L'\0') {
+        return MFTSCAN_OK;
     }
 
     grown_items = (MftscanFileNode *)mftscan_realloc_array(
@@ -58,16 +65,41 @@ static MftscanError mftscan_append_file(MftscanContext *context, MftscanRecordIn
     file_index = context->files.count++;
     memset(&context->files.items[file_index], 0, sizeof(MftscanFileNode));
     context->files.items[file_index].frn = record_info->frn;
-    context->files.items[file_index].parent_frn = record_info->parent_frn;
-    context->files.items[file_index].name = record_info->name;
+    context->files.items[file_index].parent_frn = parent_frn;
+    context->files.items[file_index].name = *name;
     context->files.items[file_index].logical_size = record_info->logical_size;
     context->files.items[file_index].allocated_size = record_info->allocated_size;
     context->files.items[file_index].metadata_fallback_logical_size = record_info->metadata_fallback_logical_size;
     context->files.items[file_index].metadata_fallback_allocated_size = record_info->metadata_fallback_allocated_size;
     context->files.items[file_index].has_primary_stream_size = record_info->has_primary_stream_size;
     context->files.items[file_index].has_metadata_fallback_size = record_info->has_metadata_fallback_size;
-    record_info->name = NULL;
+    *name = NULL;
     return MFTSCAN_OK;
+}
+
+static MftscanError mftscan_ingest_file_link(
+    MftscanContext *context,
+    MftscanRecordInfo *record_info,
+    uint64_t parent_frn,
+    wchar_t **name) {
+    MftscanDirNode *directory_node = NULL;
+    MftscanError error_code = MFTSCAN_OK;
+
+    if (context == NULL || record_info == NULL || name == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+    if (parent_frn == 0ULL || parent_frn == record_info->frn) {
+        return MFTSCAN_OK;
+    }
+
+    error_code = mftscan_ensure_directory(context, parent_frn, &directory_node);
+    if (error_code != MFTSCAN_OK) {
+        return error_code;
+    }
+    directory_node->logical_size += record_info->logical_size;
+    directory_node->allocated_size += record_info->allocated_size;
+
+    return mftscan_append_file(context, record_info, parent_frn, name);
 }
 
 static bool mftscan_name_equals(const wchar_t *left, const wchar_t *right) {
@@ -241,7 +273,6 @@ void mftscan_context_free(MftscanContext *context) {
     context->files.count = 0;
     context->files.capacity = 0;
     mftscan_map_free(&context->directory_index);
-    mftscan_map_free(&context->seen_files);
 }
 
 MftscanError mftscan_ingest_record(MftscanContext *context, MftscanRecordInfo *record_info) {
@@ -288,29 +319,21 @@ MftscanError mftscan_ingest_record(MftscanContext *context, MftscanRecordInfo *r
         return MFTSCAN_OK;
     }
 
-    if (mftscan_set_contains(&context->seen_files, record_info->frn)) {
-        return MFTSCAN_OK;
-    }
+    if (record_info->file_name_link_count > 0U) {
+        size_t link_index = 0;
 
-    error_code = mftscan_set_add(&context->seen_files, record_info->frn);
-    if (error_code != MFTSCAN_OK) {
-        return error_code;
-    }
+        for (link_index = 0; link_index < record_info->file_name_link_count; ++link_index) {
+            MftscanRecordFileNameLink *link = &record_info->file_name_links[link_index];
 
-    if (record_info->parent_frn != 0ULL && record_info->parent_frn != record_info->frn) {
-        error_code = mftscan_ensure_directory(context, record_info->parent_frn, &directory_node);
-        if (error_code != MFTSCAN_OK) {
-            return error_code;
+            error_code = mftscan_ingest_file_link(context, record_info, link->parent_frn, &link->name);
+            if (error_code != MFTSCAN_OK) {
+                return error_code;
+            }
         }
-        directory_node->logical_size += record_info->logical_size;
-        directory_node->allocated_size += record_info->allocated_size;
-    }
-
-    if (record_info->name == NULL || record_info->name[0] == L'\0') {
         return MFTSCAN_OK;
     }
 
-    return mftscan_append_file(context, record_info);
+    return mftscan_ingest_file_link(context, record_info, record_info->parent_frn, &record_info->name);
 }
 
 MftscanError mftscan_finalize_metadata_tree(MftscanContext *context) {

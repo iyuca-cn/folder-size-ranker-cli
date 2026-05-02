@@ -52,6 +52,12 @@ typedef struct MftscanFileVector {
     size_t capacity;
 } MftscanFileVector;
 
+typedef struct MftscanRecordFileNameLink {
+    uint64_t parent_frn;
+    wchar_t *name;
+    uint8_t name_priority;
+} MftscanRecordFileNameLink;
+
 typedef struct MftscanUint64MapEntry {
     uint64_t key;
     size_t value;
@@ -73,6 +79,9 @@ typedef struct MftscanRecordInfo {
     uint64_t metadata_fallback_allocated_size;
     uint64_t directory_metadata_allocated_size;
     wchar_t *name;
+    MftscanRecordFileNameLink *file_name_links;
+    size_t file_name_link_count;
+    size_t file_name_link_capacity;
     uint8_t name_priority;
     bool has_data_size;
     bool has_primary_stream_size;
@@ -127,14 +136,11 @@ struct MftscanContext {
     MftscanDirVector directories;
     MftscanFileVector files;
     MftscanUint64Map directory_index;
-    MftscanUint64Map seen_files;
 };
 
 void *mftscan_realloc_array(void *buffer, size_t item_size, size_t *capacity, size_t required_count);
 bool mftscan_map_get(const MftscanUint64Map *map, uint64_t key, size_t *value);
 MftscanError mftscan_map_put(MftscanUint64Map *map, uint64_t key, size_t value);
-bool mftscan_set_contains(const MftscanUint64Map *set_map, uint64_t key);
-MftscanError mftscan_set_add(MftscanUint64Map *set_map, uint64_t key);
 void mftscan_map_free(MftscanUint64Map *map);
 void mftscan_free_record_info(MftscanRecordInfo *record_info);
 void mftscan_set_error_detail(const char *format_text, ...);

@@ -18,6 +18,7 @@
 #define MFTSCAN_ATTRIBUTE_LOGGED_UTILITY_STREAM 0x100UL
 #define MFTSCAN_ATTRIBUTE_FLAG_COMPRESSED 0x0001U
 #define MFTSCAN_ATTRIBUTE_FLAG_SPARSE 0x8000U
+#define MFTSCAN_FILE_NAME_NAMESPACE_DOS 2U
 
 #pragma pack(push, 1)
 typedef struct MftscanNtfsFileRecordHeader {
@@ -369,6 +370,59 @@ static bool mftscan_attribute_list_entry_name_equals(
     return _wcsnicmp(entry_name, expected_name, expected_length) == 0;
 }
 
+static MftscanError mftscan_add_file_name_link(
+    MftscanRecordInfo *record_info,
+    uint64_t parent_frn,
+    const wchar_t *name,
+    size_t name_length,
+    uint8_t name_priority) {
+    size_t index = 0;
+    wchar_t *copied_name = NULL;
+    MftscanRecordFileNameLink *grown_links = NULL;
+
+    if (record_info == NULL || name == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+    if (parent_frn == 0ULL || name_length == 0U) {
+        return MFTSCAN_OK;
+    }
+
+    for (index = 0; index < record_info->file_name_link_count; ++index) {
+        MftscanRecordFileNameLink *link = &record_info->file_name_links[index];
+
+        if (link->parent_frn == parent_frn &&
+            wcslen(link->name) == name_length &&
+            _wcsnicmp(link->name, name, name_length) == 0) {
+            link->name_priority = name_priority;
+            return MFTSCAN_OK;
+        }
+    }
+
+    copied_name = (wchar_t *)malloc((name_length + 1U) * sizeof(wchar_t));
+    if (copied_name == NULL) {
+        return MFTSCAN_ERROR_OUT_OF_MEMORY;
+    }
+    memcpy(copied_name, name, name_length * sizeof(wchar_t));
+    copied_name[name_length] = L'\0';
+
+    grown_links = (MftscanRecordFileNameLink *)mftscan_realloc_array(
+        record_info->file_name_links,
+        sizeof(MftscanRecordFileNameLink),
+        &record_info->file_name_link_capacity,
+        record_info->file_name_link_count + 1U);
+    if (grown_links == NULL) {
+        free(copied_name);
+        return MFTSCAN_ERROR_OUT_OF_MEMORY;
+    }
+
+    record_info->file_name_links = grown_links;
+    record_info->file_name_links[record_info->file_name_link_count].parent_frn = parent_frn;
+    record_info->file_name_links[record_info->file_name_link_count].name = copied_name;
+    record_info->file_name_links[record_info->file_name_link_count].name_priority = name_priority;
+    record_info->file_name_link_count += 1U;
+    return MFTSCAN_OK;
+}
+
 static MftscanError mftscan_capture_file_name(
     const MftscanNtfsResidentAttributeHeader *resident_header,
     size_t attribute_length,
@@ -404,6 +458,18 @@ static MftscanError mftscan_capture_file_name(
         file_name_size->present = true;
     }
     candidate_priority = mftscan_name_priority(file_name_attribute->file_name_type);
+    if (!record_info->is_directory) {
+        if (file_name_attribute->file_name_type == MFTSCAN_FILE_NAME_NAMESPACE_DOS) {
+            return MFTSCAN_OK;
+        }
+        return mftscan_add_file_name_link(
+            record_info,
+            file_name_attribute->parent_directory & MFTSCAN_FRN_MASK,
+            file_name_attribute->file_name,
+            file_name_attribute->file_name_length,
+            candidate_priority);
+    }
+
     if (candidate_priority < record_info->name_priority) {
         return MFTSCAN_OK;
     }
@@ -1137,10 +1203,134 @@ cleanup:
     return error_code;
 }
 
+static MftscanError mftscan_capture_file_name_in_record(
+    const MftscanVolumeHandle *volume_handle,
+    uint64_t segment_frn,
+    uint64_t base_record_frn,
+    const MftscanNtfsAttributeListEntry *target_entry,
+    MftscanRecordInfo *record_info,
+    MftscanNtfsDataSizeCandidate *file_name_size) {
+    NTFS_FILE_RECORD_OUTPUT_BUFFER *output_buffer = NULL;
+    MftscanNtfsFileRecordHeader *header = NULL;
+    size_t output_buffer_size = 0;
+    uint64_t actual_record = 0ULL;
+    bool reached_end = false;
+    bool found = false;
+    size_t attribute_offset = 0;
+    MftscanError error_code = MFTSCAN_OK;
+
+    if (volume_handle == NULL || target_entry == NULL || record_info == NULL ||
+        file_name_size == NULL || segment_frn == 0ULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    output_buffer_size = offsetof(NTFS_FILE_RECORD_OUTPUT_BUFFER, FileRecordBuffer) + volume_handle->bytes_per_file_record;
+    output_buffer = (NTFS_FILE_RECORD_OUTPUT_BUFFER *)malloc(output_buffer_size);
+    if (output_buffer == NULL) {
+        return MFTSCAN_ERROR_OUT_OF_MEMORY;
+    }
+
+    error_code = mftscan_read_file_record(
+        volume_handle,
+        segment_frn,
+        output_buffer,
+        output_buffer_size,
+        &actual_record,
+        &reached_end);
+    if (error_code != MFTSCAN_OK) {
+        mftscan_set_error_detail("读取 attribute list 指向的 FILE_NAME FRN %llu 失败", (unsigned long long)segment_frn);
+        goto cleanup;
+    }
+    if (reached_end || actual_record != segment_frn) {
+        mftscan_set_error_detail(
+            "attribute list 指向 FILE_NAME FRN %llu，但实际读取到 FRN %llu",
+            (unsigned long long)segment_frn,
+            (unsigned long long)actual_record);
+        error_code = MFTSCAN_ERROR_MFT_PARSE;
+        goto cleanup;
+    }
+
+    header = (MftscanNtfsFileRecordHeader *)output_buffer->FileRecordBuffer;
+    if (header->signature != MFTSCAN_FILE_RECORD_SIGNATURE ||
+        (header->flags & 0x0001U) == 0U ||
+        !mftscan_record_layout_is_valid(header, volume_handle->bytes_per_file_record)) {
+        mftscan_set_error_detail("attribute list 指向的 FILE_NAME FRN %llu 不是有效文件记录", (unsigned long long)segment_frn);
+        error_code = MFTSCAN_ERROR_MFT_PARSE;
+        goto cleanup;
+    }
+
+    if (segment_frn == base_record_frn) {
+        if (header->base_file_record != 0ULL) {
+            mftscan_set_error_detail("FRN %llu 应为 base record 但带有 base 引用", (unsigned long long)segment_frn);
+            error_code = MFTSCAN_ERROR_MFT_PARSE;
+            goto cleanup;
+        }
+    } else if ((header->base_file_record & MFTSCAN_FRN_MASK) != base_record_frn) {
+        mftscan_set_error_detail(
+            "FILE_NAME extension FRN %llu 不属于 base FRN %llu",
+            (unsigned long long)segment_frn,
+            (unsigned long long)base_record_frn);
+        error_code = MFTSCAN_ERROR_MFT_PARSE;
+        goto cleanup;
+    }
+
+    attribute_offset = header->first_attribute_offset;
+    while (attribute_offset + sizeof(MftscanNtfsAttributeHeader) <= header->used_size &&
+        attribute_offset + sizeof(MftscanNtfsAttributeHeader) <= volume_handle->bytes_per_file_record) {
+        MftscanNtfsAttributeHeader *attribute_header =
+            (MftscanNtfsAttributeHeader *)(output_buffer->FileRecordBuffer + attribute_offset);
+
+        if (attribute_header->type == MFTSCAN_ATTRIBUTE_END) {
+            break;
+        }
+        if (attribute_header->length == 0 ||
+            attribute_offset + attribute_header->length > header->used_size ||
+            attribute_offset + attribute_header->length > volume_handle->bytes_per_file_record) {
+            mftscan_set_error_detail("FILE_NAME extension FRN %llu 属性边界非法", (unsigned long long)segment_frn);
+            error_code = MFTSCAN_ERROR_MFT_PARSE;
+            goto cleanup;
+        }
+
+        if (attribute_header->type == MFTSCAN_ATTRIBUTE_FILE_NAME &&
+            attribute_header->attribute_number == target_entry->attribute_id) {
+            if (attribute_header->non_resident != 0U) {
+                mftscan_set_error_detail("FILE_NAME extension FRN %llu 包含非 resident FILE_NAME", (unsigned long long)segment_frn);
+                error_code = MFTSCAN_ERROR_MFT_PARSE;
+                goto cleanup;
+            }
+
+            error_code = mftscan_capture_file_name(
+                (const MftscanNtfsResidentAttributeHeader *)attribute_header,
+                attribute_header->length,
+                record_info,
+                file_name_size);
+            if (error_code != MFTSCAN_OK) {
+                goto cleanup;
+            }
+            found = true;
+            break;
+        }
+
+        attribute_offset += attribute_header->length;
+    }
+
+    if (!found) {
+        mftscan_set_error_detail(
+            "extension FRN %llu 未找到属性号 %u 的 FILE_NAME",
+            (unsigned long long)segment_frn,
+            (unsigned int)target_entry->attribute_id);
+        error_code = MFTSCAN_ERROR_MFT_PARSE;
+    }
+
+cleanup:
+    free(output_buffer);
+    return error_code;
+}
+
 static MftscanError mftscan_resolve_data_size_from_attribute_list(
     const MftscanVolumeHandle *volume_handle,
     uint64_t base_record_frn,
-    bool is_directory,
+    MftscanRecordInfo *record_info,
     MftscanNtfsParseState *parse_state,
     MftscanNtfsDataSizeCandidate *resolved_size) {
     size_t offset = 0;
@@ -1148,7 +1338,7 @@ static MftscanError mftscan_resolve_data_size_from_attribute_list(
     bool saw_vcn0_entry = false;
     MftscanNtfsDataSizeCandidate combined_size = { 0 };
 
-    if (volume_handle == NULL || parse_state == NULL || resolved_size == NULL) {
+    if (volume_handle == NULL || record_info == NULL || parse_state == NULL || resolved_size == NULL) {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
     }
 
@@ -1183,13 +1373,33 @@ static MftscanError mftscan_resolve_data_size_from_attribute_list(
             return MFTSCAN_ERROR_MFT_PARSE;
         }
 
+        if (entry->type == MFTSCAN_ATTRIBUTE_FILE_NAME && entry->name_length == 0U) {
+            segment_frn = entry->segment_reference & MFTSCAN_FRN_MASK;
+            if (segment_frn == 0ULL) {
+                mftscan_set_error_detail("$ATTRIBUTE_LIST FILE_NAME entry 的 FRN 为 0");
+                return MFTSCAN_ERROR_MFT_PARSE;
+            }
+            if (segment_frn != base_record_frn) {
+                error_code = mftscan_capture_file_name_in_record(
+                    volume_handle,
+                    segment_frn,
+                    base_record_frn,
+                    entry,
+                    record_info,
+                    &parse_state->file_name_size);
+                if (error_code != MFTSCAN_OK) {
+                    return error_code;
+                }
+            }
+        }
+
         if ((entry->type == MFTSCAN_ATTRIBUTE_DATA && entry->name_length == 0U) ||
-            (!is_directory &&
+            (!record_info->is_directory &&
                 (((entry->type == MFTSCAN_ATTRIBUTE_DATA && entry->name_length != 0U) ||
                     entry->type == MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION ||
                     entry->type == MFTSCAN_ATTRIBUTE_BITMAP ||
                     entry->type == MFTSCAN_ATTRIBUTE_LOGGED_UTILITY_STREAM))) ||
-            (is_directory &&
+            (record_info->is_directory &&
                 (entry->type == MFTSCAN_ATTRIBUTE_INDEX_ALLOCATION ||
                     entry->type == MFTSCAN_ATTRIBUTE_BITMAP))) {
             MftscanNtfsDataSizeCandidate fragment_size = { 0 };
@@ -1247,7 +1457,7 @@ static MftscanError mftscan_resolve_data_size_from_attribute_list(
                 if (entry->lowest_vcn == 0ULL) {
                     saw_vcn0_entry = true;
                 }
-            } else if (is_directory) {
+            } else if (record_info->is_directory) {
                 if (!mftscan_add_data_size_candidate(&parse_state->directory_self_size, &fragment_size)) {
                     return MFTSCAN_ERROR_MFT_PARSE;
                 }
@@ -1466,7 +1676,7 @@ MftscanError mftscan_parse_file_record(
         error_code = mftscan_resolve_data_size_from_attribute_list(
             volume_handle,
             record_info->frn,
-            record_info->is_directory,
+            record_info,
             &parse_state,
             &final_size);
         if (error_code != MFTSCAN_OK) {
@@ -1506,7 +1716,11 @@ MftscanError mftscan_parse_file_record(
         record_info->has_directory_metadata_size = true;
     }
 
-    if (record_info->name == NULL && record_info->frn != MFTSCAN_ROOT_FRN) {
+    if (record_info->frn != MFTSCAN_ROOT_FRN &&
+        ((record_info->is_directory && record_info->name == NULL) ||
+            (!record_info->is_directory &&
+                record_info->name == NULL &&
+                record_info->file_name_link_count == 0U))) {
         record_info->in_use = false;
     }
 
