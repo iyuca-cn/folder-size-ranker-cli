@@ -78,6 +78,14 @@ static bool mftscan_name_equals(const wchar_t *left, const wchar_t *right) {
     return _wcsicmp(left, right) == 0;
 }
 
+static bool mftscan_file_is_root_metadata_fallback_target(const MftscanFileNode *file_node) {
+    if (file_node == NULL || file_node->parent_frn != MFTSCAN_ROOT_FRN) {
+        return false;
+    }
+
+    return mftscan_name_equals(file_node->name, L"$Secure");
+}
+
 static bool mftscan_directory_is_in_metadata_tree(
     MftscanContext *context,
     size_t directory_index,
@@ -340,12 +348,18 @@ MftscanError mftscan_finalize_metadata_tree(MftscanContext *context) {
     for (index = 0; index < context->files.count; ++index) {
         MftscanFileNode *file_node = &context->files.items[index];
         size_t parent_index = 0;
+        bool apply_metadata_fallback = mftscan_file_is_root_metadata_fallback_target(file_node);
 
-        if (!mftscan_map_get(&context->directory_index, file_node->parent_frn, &parent_index)) {
-            continue;
+        if (!apply_metadata_fallback) {
+            if (!mftscan_map_get(&context->directory_index, file_node->parent_frn, &parent_index)) {
+                continue;
+            }
+
+            apply_metadata_fallback =
+                mftscan_directory_is_in_metadata_tree(context, parent_index, context->directories.items[extend_index].frn);
         }
 
-        if (mftscan_directory_is_in_metadata_tree(context, parent_index, context->directories.items[extend_index].frn)) {
+        if (apply_metadata_fallback) {
             uint64_t new_logical_size = file_node->logical_size;
             uint64_t new_allocated_size = file_node->allocated_size;
 

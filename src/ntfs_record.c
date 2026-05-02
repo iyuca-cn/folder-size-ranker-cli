@@ -574,8 +574,8 @@ static bool mftscan_nonresident_attribute_uses_runlist_allocated_size(
         return false;
     }
 
-    return (attribute_header->flags & MFTSCAN_ATTRIBUTE_FLAG_SPARSE) != 0U &&
-        (attribute_header->flags & MFTSCAN_ATTRIBUTE_FLAG_COMPRESSED) == 0U;
+    return (attribute_header->flags &
+        (MFTSCAN_ATTRIBUTE_FLAG_SPARSE | MFTSCAN_ATTRIBUTE_FLAG_COMPRESSED)) != 0U;
 }
 
 static MftscanError mftscan_capture_data_size_candidate(
