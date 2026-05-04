@@ -58,6 +58,32 @@ static bool mftscan_all_file_visible(const MftscanOptions *options, const Mftsca
     return mftscan_all_file_sort_value(options, file_node) >= options->min_size;
 }
 
+static bool mftscan_all_directory_is_under_root(const MftscanAllTree *tree, size_t directory_index) {
+    size_t current_index = directory_index;
+    size_t guard_count = 0;
+
+    if (tree == NULL || directory_index >= tree->count || tree->root_index >= tree->count) {
+        return false;
+    }
+
+    while (current_index != MFTSCAN_NO_INDEX) {
+        if (current_index == tree->root_index) {
+            return true;
+        }
+        if (tree->parent_indices[current_index] == MFTSCAN_NO_INDEX) {
+            break;
+        }
+
+        current_index = tree->parent_indices[current_index];
+        guard_count += 1U;
+        if (guard_count > tree->count) {
+            return false;
+        }
+    }
+
+    return false;
+}
+
 static int __cdecl mftscan_compare_all_children(void *context, const void *left_value, const void *right_value) {
     const MftscanAllSortContext *sort_context = (const MftscanAllSortContext *)context;
     size_t left_index = *(const size_t *)left_value;
@@ -405,7 +431,9 @@ static MftscanError mftscan_all_recompute_filtered_totals(
     const MftscanOptions *options,
     MftscanAllTree *tree) {
     MftscanAllFilteredFileTotals *direct_file_totals = NULL;
+    MftscanUint64Map charged_file_frns = { 0 };
     size_t index = 0;
+    MftscanError error_code = MFTSCAN_OK;
 
     if (context == NULL || options == NULL || tree == NULL) {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
@@ -423,11 +451,16 @@ static MftscanError mftscan_all_recompute_filtered_totals(
         size_t file_position = 0;
         size_t emitted_file_count = 0;
 
+        if (!mftscan_all_directory_is_under_root(tree, index)) {
+            continue;
+        }
+
         for (file_position = tree->file_offsets[index];
              file_position < tree->file_offsets[index + 1U];
              ++file_position) {
             size_t file_index = tree->file_indices[file_position];
             const MftscanFileNode *file_node = &context->files.items[file_index];
+            size_t ignored_index = 0;
 
             if (!mftscan_all_file_visible(options, file_node)) {
                 break;
@@ -436,8 +469,18 @@ static MftscanError mftscan_all_recompute_filtered_totals(
                 break;
             }
 
-            direct_file_totals[index].logical_size += file_node->logical_size;
-            direct_file_totals[index].allocated_size += file_node->allocated_size;
+            if (!mftscan_map_get(&charged_file_frns, file_node->frn, &ignored_index)) {
+                error_code = mftscan_map_put(&charged_file_frns, file_node->frn, file_index);
+                if (error_code != MFTSCAN_OK) {
+                    free(direct_file_totals);
+                    mftscan_map_free(&charged_file_frns);
+                    return error_code;
+                }
+
+                direct_file_totals[index].logical_size += file_node->logical_size;
+                direct_file_totals[index].allocated_size += file_node->allocated_size;
+            }
+
             emitted_file_count += 1U;
         }
     }
@@ -460,16 +503,21 @@ static MftscanError mftscan_all_recompute_filtered_totals(
 
             tree->logical_totals[parent_index] += logical_size;
             tree->allocated_totals[parent_index] += allocated_size;
+            if (parent_index == tree->root_index) {
+                break;
+            }
             current_index = parent_index;
             guard_count += 1U;
             if (guard_count > tree->count) {
                 free(direct_file_totals);
+                mftscan_map_free(&charged_file_frns);
                 return MFTSCAN_ERROR_INTERNAL;
             }
         }
     }
 
     free(direct_file_totals);
+    mftscan_map_free(&charged_file_frns);
     return MFTSCAN_OK;
 }
 
