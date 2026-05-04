@@ -292,7 +292,7 @@ static bool mftscan_attribute_name_is_valid(
         attribute_header->name_offset + name_size_bytes <= attribute_length;
 }
 
-static bool mftscan_attribute_name_matches_list_entry(
+static bool mftscan_attribute_matches_list_entry(
     const MftscanNtfsAttributeHeader *attribute_header,
     size_t attribute_length,
     const MftscanNtfsAttributeListEntry *entry) {
@@ -304,11 +304,29 @@ static bool mftscan_attribute_name_matches_list_entry(
         return false;
     }
 
+    if (attribute_header->attribute_number != entry->attribute_id) {
+        return false;
+    }
+
     if (!mftscan_attribute_name_is_valid(attribute_header, attribute_length)) {
         return false;
     }
 
     if (attribute_header->name_length != entry->name_length) {
+        return false;
+    }
+
+    if (attribute_header->non_resident != 0U) {
+        const MftscanNtfsNonResidentAttributeHeader *non_resident_header =
+            (const MftscanNtfsNonResidentAttributeHeader *)attribute_header;
+
+        if (sizeof(MftscanNtfsNonResidentAttributeHeader) > attribute_length) {
+            return false;
+        }
+        if (non_resident_header->lowest_vcn != entry->lowest_vcn) {
+            return false;
+        }
+    } else if (entry->lowest_vcn != 0ULL) {
         return false;
     }
 
@@ -736,7 +754,10 @@ static MftscanError mftscan_capture_data_size_fragment(
             return MFTSCAN_ERROR_MFT_PARSE;
         }
 
-        if (mftscan_nonresident_attribute_uses_runlist_allocated_size(&non_resident_header->header)) {
+        {
+            /* In $ATTRIBUTE_LIST resolution, the vcn0 header allocated_size is
+             * stream-wide. Count this fragment's mapping pairs instead so
+             * extension records do not get added on top of the stream total. */
             MftscanError error_code = mftscan_calculate_nonresident_allocated_size(
                 volume_handle,
                 non_resident_header,
@@ -745,8 +766,6 @@ static MftscanError mftscan_capture_data_size_fragment(
             if (error_code != MFTSCAN_OK) {
                 return error_code;
             }
-        } else if (non_resident_header->lowest_vcn == 0ULL) {
-            allocated_size = non_resident_header->allocated_size;
         }
 
         if (non_resident_header->lowest_vcn == 0ULL) {
@@ -798,7 +817,10 @@ static MftscanError mftscan_capture_storage_size_fragment(
             return MFTSCAN_ERROR_MFT_PARSE;
         }
 
-        if (mftscan_nonresident_attribute_uses_runlist_allocated_size(&non_resident_header->header)) {
+        {
+            /* In $ATTRIBUTE_LIST resolution, the vcn0 header allocated_size is
+             * stream-wide. Count this fragment's mapping pairs instead so
+             * extension records do not get added on top of the stream total. */
             MftscanError error_code = mftscan_calculate_nonresident_allocated_size(
                 volume_handle,
                 non_resident_header,
@@ -807,8 +829,6 @@ static MftscanError mftscan_capture_storage_size_fragment(
             if (error_code != MFTSCAN_OK) {
                 return error_code;
             }
-        } else if (non_resident_header->lowest_vcn == 0ULL) {
-            allocated_size = non_resident_header->allocated_size;
         }
 
         if (non_resident_header->lowest_vcn == 0ULL) {
@@ -1180,7 +1200,7 @@ static MftscanError mftscan_find_attribute_size_in_record(
         }
 
         if (attribute_header->type == attribute_type &&
-            mftscan_attribute_name_matches_list_entry(attribute_header, attribute_header->length, target_entry)) {
+            mftscan_attribute_matches_list_entry(attribute_header, attribute_header->length, target_entry)) {
             error_code = mftscan_capture_storage_size_fragment(
                 volume_handle,
                 attribute_header,
@@ -1413,32 +1433,15 @@ static MftscanError mftscan_resolve_data_size_from_attribute_list(
                 return MFTSCAN_ERROR_MFT_PARSE;
             }
 
-            if (segment_frn == base_record_frn) {
-                if (is_primary_data && entry->lowest_vcn == 0ULL && parse_state->direct_data_size.present) {
-                    fragment_size = parse_state->direct_data_size;
-                } else {
-                    error_code = mftscan_find_attribute_size_in_record(
-                        volume_handle,
-                        segment_frn,
-                        base_record_frn,
-                        entry->type,
-                        entry,
-                        &fragment_size);
-                    if (error_code != MFTSCAN_OK) {
-                        return error_code;
-                    }
-                }
-            } else {
-                error_code = mftscan_find_attribute_size_in_record(
-                    volume_handle,
-                    segment_frn,
-                    base_record_frn,
-                    entry->type,
-                    entry,
-                    &fragment_size);
-                if (error_code != MFTSCAN_OK) {
-                    return error_code;
-                }
+            error_code = mftscan_find_attribute_size_in_record(
+                volume_handle,
+                segment_frn,
+                base_record_frn,
+                entry->type,
+                entry,
+                &fragment_size);
+            if (error_code != MFTSCAN_OK) {
+                return error_code;
             }
 
             if (!fragment_size.present) {
