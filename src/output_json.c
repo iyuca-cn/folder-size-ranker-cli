@@ -431,7 +431,7 @@ static MftscanError mftscan_all_recompute_filtered_totals(
     const MftscanOptions *options,
     MftscanAllTree *tree) {
     MftscanAllFilteredFileTotals *direct_file_totals = NULL;
-    MftscanUint64Map charged_file_frns = { 0 };
+    MftscanUint64Map charged_allocated_file_frns = { 0 };
     size_t index = 0;
     MftscanError error_code = MFTSCAN_OK;
 
@@ -469,7 +469,7 @@ static MftscanError mftscan_all_recompute_filtered_totals(
                 guard_count += 1U;
                 if (guard_count > tree->count) {
                     free(direct_file_totals);
-                    mftscan_map_free(&charged_file_frns);
+                    mftscan_map_free(&charged_allocated_file_frns);
                     return MFTSCAN_ERROR_INTERNAL;
                 }
             }
@@ -498,15 +498,16 @@ static MftscanError mftscan_all_recompute_filtered_totals(
                 break;
             }
 
-            if (!mftscan_map_get(&charged_file_frns, file_node->frn, &ignored_index)) {
-                error_code = mftscan_map_put(&charged_file_frns, file_node->frn, file_index);
+            direct_file_totals[index].logical_size += file_node->logical_size;
+
+            if (!mftscan_map_get(&charged_allocated_file_frns, file_node->frn, &ignored_index)) {
+                error_code = mftscan_map_put(&charged_allocated_file_frns, file_node->frn, file_index);
                 if (error_code != MFTSCAN_OK) {
                     free(direct_file_totals);
-                    mftscan_map_free(&charged_file_frns);
+                    mftscan_map_free(&charged_allocated_file_frns);
                     return error_code;
                 }
 
-                direct_file_totals[index].logical_size += file_node->logical_size;
                 direct_file_totals[index].allocated_size += file_node->allocated_size;
             }
 
@@ -539,14 +540,14 @@ static MftscanError mftscan_all_recompute_filtered_totals(
             guard_count += 1U;
             if (guard_count > tree->count) {
                 free(direct_file_totals);
-                mftscan_map_free(&charged_file_frns);
+                mftscan_map_free(&charged_allocated_file_frns);
                 return MFTSCAN_ERROR_INTERNAL;
             }
         }
     }
 
     free(direct_file_totals);
-    mftscan_map_free(&charged_file_frns);
+    mftscan_map_free(&charged_allocated_file_frns);
     return MFTSCAN_OK;
 }
 
