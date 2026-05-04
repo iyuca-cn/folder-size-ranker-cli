@@ -41,8 +41,13 @@ typedef struct MftscanFileNode {
     uint64_t allocated_size;
     uint64_t metadata_fallback_logical_size;
     uint64_t metadata_fallback_allocated_size;
+    uint64_t named_metadata_logical_size;
+    uint64_t named_metadata_allocated_size;
+    uint64_t local_metadata_allocated_size;
     bool has_primary_stream_size;
     bool has_metadata_fallback_size;
+    bool has_named_metadata_size;
+    bool has_local_metadata_size;
     bool in_metadata_tree;
 } MftscanFileNode;
 
@@ -77,6 +82,9 @@ typedef struct MftscanRecordInfo {
     uint64_t allocated_size;
     uint64_t metadata_fallback_logical_size;
     uint64_t metadata_fallback_allocated_size;
+    uint64_t named_metadata_logical_size;
+    uint64_t named_metadata_allocated_size;
+    uint64_t local_metadata_allocated_size;
     uint64_t directory_metadata_allocated_size;
     wchar_t *name;
     MftscanRecordFileNameLink *file_name_links;
@@ -86,6 +94,8 @@ typedef struct MftscanRecordInfo {
     bool has_data_size;
     bool has_primary_stream_size;
     bool has_metadata_fallback_size;
+    bool has_named_metadata_size;
+    bool has_local_metadata_size;
     bool has_directory_metadata_size;
     bool in_use;
     bool is_directory;

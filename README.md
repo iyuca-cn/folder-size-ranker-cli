@@ -26,7 +26,8 @@
 - NTFS 文件大小：优先按未命名 `$DATA` 数据流计算 `logical_size` / `allocated_size`；普通命名 ADS 不计入目录大小。WOF 压缩文件会把 `:WofCompressedData` 命名流作为 `allocated_size` 兜底；对 `$Secure` 及 `$Extend` 元数据子树中没有未命名 `$DATA` 的记录，会按命名系统流/索引属性兜底计算分配大小。
 - NTFS 小文件：`allocated_size` 取决于未命名 `$DATA` 当前是否 resident。resident 时按 `0` 统计；non-resident 时按实际已分配簇统计，所以文件曾经变大后即使逻辑大小缩小，`allocated_size` 也可能仍大于 `0`。
 - NTFS non-resident 分配大小：普通流使用属性头里的 `allocated_size`；压缩/稀疏流按 runlist 中真实已分配的 runs 计算，稀疏洞（sparse holes）不计入 `allocated_size`。
-- NTFS 系统目录元数据：系统目录自身的 `$INDEX_ALLOCATION` / `$BITMAP` 等元数据会计入 `allocated_size`，不计入 `logical_size`。
+- NTFS 本地元数据：`--sort allocated --all` 会把目录自身的 `$INDEX_ALLOCATION` / `$BITMAP` / `$REPARSE_POINT` 等本地元数据计入目录及祖先目录的 `bytes`；文件的非内容本地元数据流也会计入 `allocated_size`，不计入 `logical_size`。普通命名 ADS 仍不计入目录大小。
+- NTFS 元文件：`$MFT`、`$Secure`、`$Extend` 下的系统文件会按 MFT 中的命名系统流和本地元数据属性计算分配大小，并避免 attribute-list 片段与 base record 重复累加。
 
 指定 `--all` 时：
 

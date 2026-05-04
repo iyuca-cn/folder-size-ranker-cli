@@ -71,8 +71,13 @@ static MftscanError mftscan_append_file(
     context->files.items[file_index].allocated_size = record_info->allocated_size;
     context->files.items[file_index].metadata_fallback_logical_size = record_info->metadata_fallback_logical_size;
     context->files.items[file_index].metadata_fallback_allocated_size = record_info->metadata_fallback_allocated_size;
+    context->files.items[file_index].named_metadata_logical_size = record_info->named_metadata_logical_size;
+    context->files.items[file_index].named_metadata_allocated_size = record_info->named_metadata_allocated_size;
+    context->files.items[file_index].local_metadata_allocated_size = record_info->local_metadata_allocated_size;
     context->files.items[file_index].has_primary_stream_size = record_info->has_primary_stream_size;
     context->files.items[file_index].has_metadata_fallback_size = record_info->has_metadata_fallback_size;
+    context->files.items[file_index].has_named_metadata_size = record_info->has_named_metadata_size;
+    context->files.items[file_index].has_local_metadata_size = record_info->has_local_metadata_size;
     *name = NULL;
     return MFTSCAN_OK;
 }
@@ -371,7 +376,8 @@ MftscanError mftscan_finalize_metadata_tree(MftscanContext *context) {
     for (index = 0; index < context->files.count; ++index) {
         MftscanFileNode *file_node = &context->files.items[index];
         size_t parent_index = 0;
-        bool apply_metadata_fallback = mftscan_file_is_root_metadata_fallback_target(file_node);
+        bool apply_root_metadata_fallback = mftscan_file_is_root_metadata_fallback_target(file_node);
+        bool apply_metadata_fallback = apply_root_metadata_fallback;
 
         if (!apply_metadata_fallback) {
             if (!mftscan_map_get(&context->directory_index, file_node->parent_frn, &parent_index)) {
@@ -385,13 +391,30 @@ MftscanError mftscan_finalize_metadata_tree(MftscanContext *context) {
         if (apply_metadata_fallback) {
             uint64_t new_logical_size = file_node->logical_size;
             uint64_t new_allocated_size = file_node->allocated_size;
+            uint64_t metadata_allocated_size = 0ULL;
 
             file_node->in_metadata_tree = true;
-            if (file_node->has_metadata_fallback_size) {
+            if (file_node->has_named_metadata_size &&
+                metadata_allocated_size < file_node->named_metadata_allocated_size) {
+                metadata_allocated_size = file_node->named_metadata_allocated_size;
                 if (!file_node->has_primary_stream_size && new_logical_size == 0ULL) {
-                    new_logical_size = file_node->metadata_fallback_logical_size;
+                    new_logical_size = file_node->named_metadata_logical_size;
                 }
-                new_allocated_size += file_node->metadata_fallback_allocated_size;
+            }
+            if (file_node->has_local_metadata_size &&
+                metadata_allocated_size < file_node->local_metadata_allocated_size) {
+                metadata_allocated_size = file_node->local_metadata_allocated_size;
+            }
+            if (apply_root_metadata_fallback &&
+                file_node->has_named_metadata_size &&
+                file_node->has_local_metadata_size) {
+                metadata_allocated_size =
+                    file_node->named_metadata_allocated_size + file_node->local_metadata_allocated_size;
+            }
+            if (metadata_allocated_size > 0ULL) {
+                if (new_allocated_size < metadata_allocated_size) {
+                    new_allocated_size = metadata_allocated_size;
+                }
                 mftscan_adjust_directory_totals(
                     context,
                     file_node->parent_frn,
@@ -402,6 +425,17 @@ MftscanError mftscan_finalize_metadata_tree(MftscanContext *context) {
                 file_node->logical_size = new_logical_size;
                 file_node->allocated_size = new_allocated_size;
             }
+        } else if (file_node->has_local_metadata_size && file_node->local_metadata_allocated_size > 0ULL) {
+            uint64_t new_allocated_size = file_node->allocated_size + file_node->local_metadata_allocated_size;
+
+            mftscan_adjust_directory_totals(
+                context,
+                file_node->parent_frn,
+                file_node->logical_size,
+                file_node->logical_size,
+                file_node->allocated_size,
+                new_allocated_size);
+            file_node->allocated_size = new_allocated_size;
         }
     }
 

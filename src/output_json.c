@@ -447,6 +447,35 @@ static MftscanError mftscan_all_recompute_filtered_totals(
     memset(tree->logical_totals, 0, tree->count * sizeof(uint64_t));
     memset(tree->allocated_totals, 0, tree->count * sizeof(uint64_t));
 
+    if (options->sort_mode == MFTSCAN_SORT_ALLOCATED) {
+        for (index = 0; index < tree->count; ++index) {
+            uint64_t allocated_size = context->directories.items[index].metadata_allocated_size;
+            size_t current_index = index;
+            size_t guard_count = 0;
+
+            if (allocated_size == 0ULL || !mftscan_all_directory_is_under_root(tree, index)) {
+                continue;
+            }
+
+            tree->allocated_totals[current_index] += allocated_size;
+            while (tree->parent_indices[current_index] != MFTSCAN_NO_INDEX) {
+                size_t parent_index = tree->parent_indices[current_index];
+
+                tree->allocated_totals[parent_index] += allocated_size;
+                if (parent_index == tree->root_index) {
+                    break;
+                }
+                current_index = parent_index;
+                guard_count += 1U;
+                if (guard_count > tree->count) {
+                    free(direct_file_totals);
+                    mftscan_map_free(&charged_file_frns);
+                    return MFTSCAN_ERROR_INTERNAL;
+                }
+            }
+        }
+    }
+
     for (index = 0; index < tree->count; ++index) {
         size_t file_position = 0;
         size_t emitted_file_count = 0;
