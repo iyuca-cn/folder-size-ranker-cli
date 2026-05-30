@@ -1,261 +1,161 @@
+<div align="center">
+
 # folder-size-ranker-cli
 
-`folder-size-ranker-cli` 是一个 Windows 命令行工具，用 C 语言实现，用于统计文件夹大小。NTFS 卷会直接读取 MFT，其他文件系统会降级为平台系统 API 扫描。
+**快速统计 Windows 文件夹大小的命令行工具**
 
-它的目标是做类似 WizTree 的快速统计。默认输出“没有子文件夹的文件夹”，也就是叶子目录，并按大小从大到小排序；指定 `--all` 时会输出指定位置下所有层级目录的 JSON 树。
+[![Windows](https://img.shields.io/badge/Platform-Windows-0078D6?style=flat-square&logo=windows)](https://www.microsoft.com/windows)
+[![C](https://img.shields.io/badge/Language-C-A8B9CC?style=flat-square&logo=c)](https://en.wikipedia.org/wiki/C_(programming_language))
+[![CI](https://img.shields.io/github/actions/workflow/status/user/folder-size-ranker-cli/ci.yml?style=flat-square&label=CI)](https://github.com/user/folder-size-ranker-cli/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
+[![Release](https://img.shields.io/github/v/tag/user/folder-size-ranker-cli?style=flat-square&label=Release)](https://github.com/user/folder-size-ranker-cli/releases)
 
-## 作用
+[English](README_EN.md) | 中文
 
-- NTFS 卷直接读取目标所在盘符的 MFT，不递归遍历目录。
-- 非 NTFS 卷使用 Win32 平台 API 降级扫描，通过显式栈迭代遍历目录树，不使用递归函数。
-- 统计叶子目录的文件大小。
-- 支持输出指定位置下所有层级目录的紧凑 JSON 树。
-- 支持按逻辑大小或分配大小排序。
-- 支持设置最小输出大小。
-- 支持表格输出和 JSON 输出。
+</div>
 
-## 统计口径
+## 简介
 
-默认模式只输出叶子目录：
+`folder-size-ranker-cli` 是一个 Windows 命令行工具，用于快速统计文件夹大小。NTFS 卷直接读取 MFT（主文件表），非 NTFS 卷自动降级为平台 API 扫描，实现类似 [WizTree](https://www.diskanalyzer.com/) 的极速统计。
 
-- 叶子目录：目录下面没有任何子文件夹。
-- 非叶子目录：目录下面还有子文件夹，不会出现在输出结果里。
-- 目录大小：该叶子目录直属文件的大小总和。
-- 硬链接：`--sort logical --all` 目录总量按可见硬链接路径统计逻辑大小；`--sort allocated --all` 按同一 NTFS 文件记录（FRN）去重统计分配大小，避免同一份磁盘簇因多个硬链接路径被重复计入。DOS-only 8.3 别名不作为额外目录项统计。
-- 资源管理器口径差异：逻辑大小更接近按路径枚举的“大小”口径；分配大小更接近“唯一文件实体”或卷级物理占用口径，大量硬链接路径仍会在文件列表中可见，但不会把同一份分配空间重复加入目录总量。
-- NTFS 文件大小：优先按未命名 `$DATA` 数据流计算 `logical_size` / `allocated_size`；普通命名 ADS 不计入目录大小。WOF 压缩文件会把 `:WofCompressedData` 命名流作为 `allocated_size` 兜底；对 `$Secure` 及 `$Extend` 元数据子树中没有未命名 `$DATA` 的记录，会按命名系统流/索引属性兜底计算分配大小。
-- NTFS 小文件：`allocated_size` 取决于未命名 `$DATA` 当前是否 resident。resident 时按 `0` 统计；non-resident 时按实际已分配簇统计，所以文件曾经变大后即使逻辑大小缩小，`allocated_size` 也可能仍大于 `0`。
-- NTFS non-resident 分配大小：普通流使用属性头里的 `allocated_size`；压缩/稀疏流按 runlist 中真实已分配的 runs 计算，稀疏洞（sparse holes）不计入 `allocated_size`。
-- NTFS 本地元数据：`--sort allocated --all` 会把目录自身的 `$INDEX_ALLOCATION` / `$BITMAP` / `$REPARSE_POINT` 等本地元数据计入目录及祖先目录的 `bytes`；文件的非内容本地元数据流也会计入 `allocated_size`，不计入 `logical_size`。普通命名 ADS 仍不计入目录大小。
-- NTFS 元文件：`$MFT`、`$Secure`、`$Extend` 下的系统文件会按 MFT 中的命名系统流和本地元数据属性计算分配大小，并避免 attribute-list 片段与 base record 重复累加。
+## 核心特性
 
-指定 `--all` 时：
+- ⚡ **极速扫描** - NTFS 卷直接读取 MFT，无需递归遍历目录
+- 📊 **灵活输出** - 支持表格和 JSON 两种输出格式
+- 🔍 **智能排序** - 按逻辑大小或分配大小排序
+- 🎯 **精准过滤** - 支持表达式计算的最小大小过滤
+- 📁 **完整树结构** - `--all` 模式输出完整目录树 JSON
+- 💻 **双架构支持** - 提供 x86 和 x64 两个版本
 
-- 根对象的 `root_path` 是 `--location` 指定的目录或盘符根目录完整路径。
-- 子目录和文件节点只输出 `name`，不重复输出完整路径。
-- `files` 包含当前目录下的直接文件。
-- `children` 包含直接子目录，子目录下继续递归包含更深层目录。
-- `--sort logical` 时，每个目录的 `bytes` 等于该节点输出的 `files` 与 `children` 中 `bytes` 的总和。
-- `--sort allocated` 时，每个目录的 `bytes` 遵循分配大小统计规则，可能包含目录自身元数据，并会按 FRN 对硬链接去重。
-- 每个文件的 `bytes` 是该文件自身大小。
-- 文件完整路径可由 `root_path`、祖先目录 `name` 链和文件 `name` 拼接得到。
-- 每一层 `files` 都按 `bytes` 从大到小排序。
-- 每一层 `children` 都按 `bytes` 从大到小排序。
-- `--min-size` 会先过滤小于指定大小的文件，再基于剩余文件汇总目录；没有任何满足条件文件的子目录不会输出，根节点始终输出。
-- `--limit` 表示每层最多输出多少个直接文件，以及多少个直接子目录；逻辑大小统计只汇总每层实际输出的文件和子目录。
-- `--all` 固定输出紧凑 JSON，不接受 `--format`。
+## 快速开始
 
-输出结果始终只有一个大小字段：
+### 1. 下载
 
-- 表格输出列名固定为 `Bytes`
-- JSON 输出字段固定为 `bytes`
-- 这个字段的含义由 `--sort` 决定：
-  - `--sort logical` 时表示逻辑大小
-  - `--sort allocated` 时表示分配大小
+从 [Releases](https://github.com/user/folder-size-ranker-cli/releases) 页面下载最新版本：
 
-## 运行要求
+- `folder-size-ranker-cli-x64.exe` - 64 位版本（推荐）
+- `folder-size-ranker-cli-x86.exe` - 32 位版本
 
-- Windows
-- NTFS 卷使用 MFT 快路径；其他文件系统使用平台 API 降级路径。
-- NTFS MFT 快路径需要管理员权限；平台 API 降级路径不做管理员前置要求。
-- 支持 x86 / x64 构建
-
-程序清单 `app.manifest` 使用 `asInvoker`。扫描 NTFS 卷时，如果当前进程未提权，程序会提示需要管理员权限；扫描非 NTFS 卷时会直接使用平台 API 降级路径。
-
-## 构建
-
-建议在 **Visual Studio Developer PowerShell** 或 **Developer Command Prompt** 中构建：
+### 2. 运行
 
 ```powershell
-msbuild .\folder-size-ranker-cli.vcxproj /t:Build /p:Configuration=Release /p:Platform=x64
+# 扫描 C 盘，按分配大小排序，显示前 20 个最大文件夹
+.\folder-size-ranker-cli-x64.exe --location C: --sort allocated --limit 20
+
+# 扫描指定目录，输出 JSON 格式
+.\folder-size-ranker-cli-x64.exe --location C:\Users --sort logical --format json
+
+# 输出完整目录树（紧凑 JSON）
+.\folder-size-ranker-cli-x64.exe --location C:\Projects --sort allocated --all
 ```
 
-```powershell
-msbuild .\folder-size-ranker-cli.vcxproj /t:Build /p:Configuration=Release /p:Platform=Win32
-```
-
-构建产物：
-
-```text
-x64\Release\folder-size-ranker-cli.exe
-x86\Release\folder-size-ranker-cli.exe
-```
-
-如果当前终端没有 `msbuild`，请先打开 Visual Studio 自带的开发者终端再执行。
-
-Release 配置显式静态链接 CRT，因此发版产物保持为单个 exe 文件。
-
-## CLI 用法
-
-```text
-folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> [--min-size expr] [--format <table|json>] [--limit N]
-folder-size-ranker-cli.exe --location <path> --sort <logical|allocated> --all [--min-size expr] [--limit N]
-```
-
-参数说明：
+## 命令行参数
 
 | 参数 | 必填 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `--location <path>` | 是 | 无 | 指定扫描位置，可以是 `C:`、`C:\` 或某个文件夹 |
-| `--sort <logical|allocated>` | 是 | 无 | 指定排序字段 |
-| `--min-size <expr>` | 否 | `0` | 只输出大小大于等于该值的目录，支持表达式 |
-| `--format <table|json>` | 否 | `table` | 输出表格或 JSON |
-| `--limit <N>` | 否 | 不限制 | 只输出前 N 条 |
-| `--all` | 否 | 关闭 | 输出所有层级目录的紧凑 JSON 树 |
-| `--help` | 否 | 无 | 显示帮助 |
+|------|------|--------|------|
+| `--location <path>` | ✅ | - | 扫描位置（如 `C:`、`C:\Windows`） |
+| `--sort <logical\|allocated>` | ✅ | - | 排序方式 |
+| `--all` | ❌ | 关闭 | 输出完整目录树 JSON |
+| `--format <table\|json>` | ❌ | `table` | 输出格式（与 `--all` 互斥） |
+| `--min-size <expr>` | ❌ | `0` | 最小大小过滤（支持表达式） |
+| `--limit <N>` | ❌ | 不限制 | 限制输出数量 |
+| `--help` | ❌ | - | 显示帮助 |
 
-说明：
+## 使用示例
 
-- `--location` 指向 NTFS 子目录时，程序仍会扫描整卷 MFT，再只输出该目录子树内的叶子目录。
-- `--location` 指向非 NTFS 子目录时，程序仍走平台 API 降级路径，并在输出阶段按该目录子树过滤。
-- `--volume` 已废弃，不再支持。
-- `--all` 与 `--format` 互斥；指定 `--all` 时输出固定为紧凑 JSON。
-- 默认模式下 `--limit` 表示输出前 N 条；`--all` 模式下 `--limit` 表示每层最多输出 N 个直接文件，以及 N 个直接子目录。
-
-`--min-size` 使用的字段和 `--sort` 一致：
-
-- `--sort logical`：按逻辑大小过滤和排序。
-- `--sort allocated`：按分配大小过滤和排序。
-
-`--min-size` 支持：
-
-- `+ - * /`
-- 括号 `()`
-- 小数
-- 空格
-
-最终结果会**向上取整**为字节数，例如：
-
-- `10/3` => `4`
-- `1.5*1024*1024` => `1572864`
-
-如果表达式里包含空格或括号，建议加引号，例如：
+### 基础用法
 
 ```powershell
-.\x64\Release\folder-size-ranker-cli.exe --location C: --sort logical --min-size "(1.5 + 0.5) * 1024 * 1024"
+# 查看 C 盘最大的 20 个文件夹（分配大小）
+.\folder-size-ranker-cli-x64.exe --location C: --sort allocated --limit 20
+
+# 查看 D 盘逻辑大小超过 1GB 的文件夹
+.\folder-size-ranker-cli-x64.exe --location D: --sort logical --min-size 1073741824
 ```
 
-## 示例
-
-输出 `C:` 盘最大的 20 个叶子目录，按分配大小排序：
+### 高级用法
 
 ```powershell
-.\x64\Release\folder-size-ranker-cli.exe --location C: --sort allocated --format table --limit 20
+# 使用表达式计算最小大小（1.5GB）
+.\folder-size-ranker-cli-x64.exe --location C: --sort allocated --min-size "1.5*1024*1024*1024"
+
+# 输出 JSON 格式，便于脚本处理
+.\folder-size-ranker-cli-x64.exe --location C: --sort allocated --format json --limit 50
+
+# 查看完整目录树，每层最多 10 个子项
+.\folder-size-ranker-cli-x64.exe --location C:\Users --sort allocated --all --limit 10
 ```
 
-输出 `C:` 盘逻辑大小至少 1 GiB 的叶子目录：
+## 输出示例
 
-```powershell
-.\x64\Release\folder-size-ranker-cli.exe --location C: --sort logical --min-size 1073741824 --format table
-```
-
-使用表达式指定最小值：
-
-```powershell
-.\x64\Release\folder-size-ranker-cli.exe --location C: --sort allocated --min-size "(1.5+0.5)*1024*1024" --format table
-```
-
-输出 JSON，方便脚本处理：
-
-```powershell
-.\x64\Release\folder-size-ranker-cli.exe --location C: --sort allocated --min-size 104857600 --format json --limit 50
-```
-
-只看某个子目录：
-
-```powershell
-.\x64\Release\folder-size-ranker-cli.exe --location C:\Windows --sort allocated --format table --limit 20
-```
-
-输出 `C:\Users` 下所有层级目录与直接文件的紧凑 JSON 树，每层最多 10 个直接文件和 10 个直接子目录：
-
-```powershell
-.\x64\Release\folder-size-ranker-cli.exe --location C:\Users --sort allocated --all --min-size 104857600 --limit 10
-```
-
-## 表格输出
-
-表格输出包含两列：
+### 表格输出
 
 ```text
 Bytes                Path
-1416950032           C:\Windows\System32\DriverStore\FileRepository\...
+1416950032           C:\Windows\System32\DriverStore\FileRepository
+524288000            C:\Program Files\Microsoft Visual Studio
+262144000            C:\Users\YourName\AppData\Local\Temp
 ```
 
-## JSON 输出
-
-JSON 输出为 UTF-8，结构如下：
+### JSON 输出
 
 ```json
 {
   "volume": "C:",
   "location": "C:\\Windows",
   "sort_by": "allocated",
-  "min_size": 104857600,
+  "min_size": 0,
   "total_leaf_dirs": 2,
   "items": [
     {
-      "path": "C:\\Example\\LeafFolder",
+      "path": "C:\\Windows\\System32",
       "bytes": 123469824
     }
   ]
 }
 ```
 
-字段说明：
+## 构建说明
 
-- `volume`：程序内部实际扫描的盘符。
-- `location`：用户请求的扫描位置。
-- `sort_by`：排序字段。
-- `min_size`：最小大小过滤值。
-- `total_leaf_dirs`：输出结果条数。
-- `items`：已经按指定字段降序排序的叶子目录列表，每项只包含 `bytes` 和 `path`。
+在 **Visual Studio Developer PowerShell** 中执行：
 
-## `--all` JSON 输出
+```powershell
+# 64 位版本
+msbuild .\folder-size-ranker-cli.vcxproj /t:Build /p:Configuration=Release /p:Platform=x64
 
-`--all` 输出为紧凑 JSON，结构如下：
-
-```json
-{"root_path":"C:\\Users","bytes":123469824,"files":[{"name":"desktop.ini","bytes":174}],"children":[{"name":"Alice","bytes":123469824,"files":[],"children":[]}]}
+# 32 位版本
+msbuild .\folder-size-ranker-cli.vcxproj /t:Build /p:Configuration=Release /p:Platform=Win32
 ```
 
-字段说明：
-
-- `root_path`：根对象的完整路径，只在根对象输出一次。
-- `name`：子目录或文件在父目录下的名称，不包含父级路径。
-- `bytes`：目录节点表示当前目录自身及所有后代目录中文件大小的递归汇总；文件节点表示单文件大小，字段含义都由 `--sort` 决定。
-- `files`：当前目录的直接文件，已按 `bytes` 降序排序。
-- `children`：当前目录的直接子目录，已按 `bytes` 降序排序，并递归包含更深层目录。
-
-完整路径恢复规则：从 `root_path` 开始，依次拼接祖先目录的 `name`，最后拼接当前文件或目录的 `name`。
-
-## 注意事项
-
-- NTFS 快路径读取底层结构，必须管理员权限运行。
-- 非 NTFS 降级路径使用平台 API 迭代遍历，速度通常慢于 NTFS MFT 快路径。
-- 非 NTFS 降级路径会跳过目录型 reparse point，避免 junction、符号链接等导致循环或重复扫描。
-- 当前一次只会解析一个 `--location`，其所属位置必须位于类似 `C:` 的本地盘符上。
-- 若部分本地虚拟盘 / RamDisk 对文件夹路径返回异常卷根，程序会回退到所属盘符继续扫描；真正挂载到文件夹的卷仍不支持。
-- 当前只输出叶子目录，不输出父目录汇总。
-- 当前第一版优先保证正确性和结构清晰，后续可以继续优化性能和输出格式。
+构建产物位置：
+- `x64\Release\folder-size-ranker-cli.exe`
+- `x86\Release\folder-size-ranker-cli.exe`
 
 ## GitHub Actions
 
-仓库配置 GitHub Actions 后：
+项目配置了 GitHub Actions 自动化工作流：
 
-- 普通 `push` / `pull_request` 会自动执行 Windows 编译检查
-- 推送 `v*` annotated tag 会自动创建 GitHub Release
-- Release 会上传由 Action 构建出的：
-  - `folder-size-ranker-cli-x86.exe`
-  - `folder-size-ranker-cli-x64.exe`
-- GitHub Release 正文严格使用 annotated tag 的完整多行描述
-- 如果使用 lightweight tag，Release 工作流会直接失败
+- **CI 构建**：每次 `push` 或 `pull_request` 自动执行 Windows 编译检查
+- **自动发版**：推送 `v*` 格式的 annotated tag 自动创建 GitHub Release
+- **双架构发布**：Release 自动上传 x86 和 x64 两个版本的可执行文件
 
-推荐这样发版：
+### 发版流程
 
 ```powershell
+# 创建 annotated tag 并推送
 git tag -a v1.0.0
 git push origin v1.0.0
 ```
 
-然后在 Git 打开的编辑器里写多行版本说明。
+在 Git 打开的编辑器中编写多行版本说明，发布后会自动显示在 GitHub Release 页面。
+
+## 注意事项
+
+- ⚠️ 扫描 NTFS 卷需要**管理员权限**
+- 非 NTFS 卷自动使用平台 API，速度较慢
+- 程序会跳过目录型 reparse point（junction、符号链接）避免循环扫描
+- 仅支持本地磁盘盘符，不支持挂载到文件夹的卷
+
+## 许可证
+
+[MIT License](LICENSE)
