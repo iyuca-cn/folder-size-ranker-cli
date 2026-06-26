@@ -4,6 +4,11 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "folder-size-ranker-cli", "folder-size-ranker-cli.vcxproj", "{6E7FD79E-4B84-4D8B-BB9E-4DDFD7D442C1}"
+	ProjectSection(ProjectDependencies) = postProject
+		{3A66E08D-6BB8-49F9-83C2-97D369A46E17} = {3A66E08D-6BB8-49F9-83C2-97D369A46E17}
+	EndProjectSection
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "mftscan-core", "mftscan-core.vcxproj", "{3A66E08D-6BB8-49F9-83C2-97D369A46E17}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -21,6 +26,14 @@ Global
 		{6E7FD79E-4B84-4D8B-BB9E-4DDFD7D442C1}.Release|Win32.Build.0 = Release|Win32
 		{6E7FD79E-4B84-4D8B-BB9E-4DDFD7D442C1}.Release|x64.ActiveCfg = Release|x64
 		{6E7FD79E-4B84-4D8B-BB9E-4DDFD7D442C1}.Release|x64.Build.0 = Release|x64
+		{3A66E08D-6BB8-49F9-83C2-97D369A46E17}.Debug|Win32.ActiveCfg = Debug|Win32
+		{3A66E08D-6BB8-49F9-83C2-97D369A46E17}.Debug|Win32.Build.0 = Debug|Win32
+		{3A66E08D-6BB8-49F9-83C2-97D369A46E17}.Debug|x64.ActiveCfg = Debug|x64
+		{3A66E08D-6BB8-49F9-83C2-97D369A46E17}.Debug|x64.Build.0 = Debug|x64
+		{3A66E08D-6BB8-49F9-83C2-97D369A46E17}.Release|Win32.ActiveCfg = Release|Win32
+		{3A66E08D-6BB8-49F9-83C2-97D369A46E17}.Release|Win32.Build.0 = Release|Win32
+		{3A66E08D-6BB8-49F9-83C2-97D369A46E17}.Release|x64.ActiveCfg = Release|x64
+		{3A66E08D-6BB8-49F9-83C2-97D369A46E17}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

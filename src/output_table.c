@@ -4,13 +4,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "model.h"
+#include "cli_output.h"
 
 static uint64_t mftscan_output_value(const MftscanOptions *options, const MftscanLeafResult *item) {
     return (options->sort_mode == MFTSCAN_SORT_ALLOCATED) ? item->allocated_size : item->logical_size;
 }
 
-MftscanError mftscan_output_table(const MftscanOptions *options, const MftscanScanResult *scan_result) {
+MftscanError mftscan_cli_output_table(const MftscanOptions *options, const MftscanScanResult *scan_result) {
     size_t index = 0;
 
     if (options == NULL || scan_result == NULL) {

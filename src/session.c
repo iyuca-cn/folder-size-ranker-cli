@@ -1,14 +1,14 @@
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 
-#include "cli_output.h"
-#include "../third_party/yyjson/yyjson.h"
+#include "model.h"
+#include "session.h"
 
 #define MFTSCAN_NO_INDEX ((size_t)-1)
+#define MFTSCAN_INVALID_NODE_ID UINT32_MAX
 
-typedef struct MftscanAllTree {
+typedef struct MftscanSessionTree {
     uint64_t *logical_totals;
     uint64_t *allocated_totals;
     size_t *parent_indices;
@@ -16,49 +16,76 @@ typedef struct MftscanAllTree {
     size_t *child_indices;
     size_t *file_offsets;
     size_t *file_indices;
+    uint32_t *direct_file_counts;
+    uint32_t *direct_child_directory_counts;
+    uint32_t *total_file_counts;
+    uint32_t *total_directory_counts;
     size_t count;
     size_t child_count;
     size_t file_count;
     size_t root_index;
-} MftscanAllTree;
+} MftscanSessionTree;
 
-typedef struct MftscanAllFilteredFileTotals {
-    uint64_t logical_size;
-    uint64_t allocated_size;
-} MftscanAllFilteredFileTotals;
+struct MftscanSession {
+    MftscanOptions options;
+    MftscanContext context;
+    MftscanSessionTree tree;
+};
 
-typedef struct MftscanAllSortContext {
+typedef struct MftscanSessionSortContext {
     const MftscanContext *context;
     const MftscanOptions *options;
-    const MftscanAllTree *tree;
-} MftscanAllSortContext;
+    const MftscanSessionTree *tree;
+} MftscanSessionSortContext;
 
-static uint64_t mftscan_all_sort_value(const MftscanOptions *options, const MftscanAllTree *tree, size_t index) {
-    return (options->sort_mode == MFTSCAN_SORT_ALLOCATED)
-        ? tree->allocated_totals[index]
-        : tree->logical_totals[index];
+typedef struct MftscanFilteredFileTotals {
+    uint64_t logical_size;
+    uint64_t allocated_size;
+} MftscanFilteredFileTotals;
+
+static uint32_t mftscan_saturate_uint32(size_t value) {
+    return value > UINT32_MAX ? UINT32_MAX : (uint32_t)value;
 }
 
-static uint64_t mftscan_all_file_sort_value(const MftscanOptions *options, const MftscanFileNode *file_node) {
+static uint32_t mftscan_add_saturated_uint32(uint32_t left, uint32_t right) {
+    return (UINT32_MAX - left < right) ? UINT32_MAX : (left + right);
+}
+
+static bool mftscan_session_directory_ready(const MftscanDirNode *directory_node) {
+    return directory_node != NULL &&
+        (directory_node->metadata_ready || directory_node->frn == MFTSCAN_ROOT_FRN);
+}
+
+static uint64_t mftscan_session_sort_value(
+    const MftscanOptions *options,
+    const MftscanSessionTree *tree,
+    size_t directory_index) {
+    return (options->sort_mode == MFTSCAN_SORT_ALLOCATED)
+        ? tree->allocated_totals[directory_index]
+        : tree->logical_totals[directory_index];
+}
+
+static uint64_t mftscan_session_file_sort_value(
+    const MftscanOptions *options,
+    const MftscanFileNode *file_node) {
     return (options->sort_mode == MFTSCAN_SORT_ALLOCATED)
         ? file_node->allocated_size
         : file_node->logical_size;
 }
 
-static bool mftscan_all_directory_ready(const MftscanDirNode *directory_node) {
-    return directory_node != NULL &&
-        (directory_node->metadata_ready || directory_node->frn == MFTSCAN_ROOT_FRN);
-}
-
-static bool mftscan_all_file_visible(const MftscanOptions *options, const MftscanFileNode *file_node) {
+static bool mftscan_session_file_visible(
+    const MftscanOptions *options,
+    const MftscanFileNode *file_node) {
     if (options == NULL || file_node == NULL) {
         return false;
     }
 
-    return mftscan_all_file_sort_value(options, file_node) >= options->min_size;
+    return mftscan_session_file_sort_value(options, file_node) >= options->min_size;
 }
 
-static bool mftscan_all_directory_is_under_root(const MftscanAllTree *tree, size_t directory_index) {
+static bool mftscan_session_directory_is_under_root(
+    const MftscanSessionTree *tree,
+    size_t directory_index) {
     size_t current_index = directory_index;
     size_t guard_count = 0;
 
@@ -84,14 +111,14 @@ static bool mftscan_all_directory_is_under_root(const MftscanAllTree *tree, size
     return false;
 }
 
-static int __cdecl mftscan_compare_all_children(void *context, const void *left_value, const void *right_value) {
-    const MftscanAllSortContext *sort_context = (const MftscanAllSortContext *)context;
+static int __cdecl mftscan_session_compare_children(void *context, const void *left_value, const void *right_value) {
+    const MftscanSessionSortContext *sort_context = (const MftscanSessionSortContext *)context;
     size_t left_index = *(const size_t *)left_value;
     size_t right_index = *(const size_t *)right_value;
     const MftscanDirNode *left_node = &sort_context->context->directories.items[left_index];
     const MftscanDirNode *right_node = &sort_context->context->directories.items[right_index];
-    uint64_t left_sort = mftscan_all_sort_value(sort_context->options, sort_context->tree, left_index);
-    uint64_t right_sort = mftscan_all_sort_value(sort_context->options, sort_context->tree, right_index);
+    uint64_t left_sort = mftscan_session_sort_value(sort_context->options, sort_context->tree, left_index);
+    uint64_t right_sort = mftscan_session_sort_value(sort_context->options, sort_context->tree, right_index);
 
     if (left_sort < right_sort) {
         return 1;
@@ -120,14 +147,14 @@ static int __cdecl mftscan_compare_all_children(void *context, const void *left_
     return 0;
 }
 
-static int __cdecl mftscan_compare_all_files(void *context, const void *left_value, const void *right_value) {
-    const MftscanAllSortContext *sort_context = (const MftscanAllSortContext *)context;
+static int __cdecl mftscan_session_compare_files(void *context, const void *left_value, const void *right_value) {
+    const MftscanSessionSortContext *sort_context = (const MftscanSessionSortContext *)context;
     size_t left_index = *(const size_t *)left_value;
     size_t right_index = *(const size_t *)right_value;
     const MftscanFileNode *left_node = &sort_context->context->files.items[left_index];
     const MftscanFileNode *right_node = &sort_context->context->files.items[right_index];
-    uint64_t left_sort = mftscan_all_file_sort_value(sort_context->options, left_node);
-    uint64_t right_sort = mftscan_all_file_sort_value(sort_context->options, right_node);
+    uint64_t left_sort = mftscan_session_file_sort_value(sort_context->options, left_node);
+    uint64_t right_sort = mftscan_session_file_sort_value(sort_context->options, right_node);
 
     if (left_sort < right_sort) {
         return 1;
@@ -156,7 +183,7 @@ static int __cdecl mftscan_compare_all_files(void *context, const void *left_val
     return 0;
 }
 
-static void mftscan_all_tree_free(MftscanAllTree *tree) {
+static void mftscan_session_tree_free(MftscanSessionTree *tree) {
     if (tree == NULL) {
         return;
     }
@@ -168,11 +195,15 @@ static void mftscan_all_tree_free(MftscanAllTree *tree) {
     free(tree->child_indices);
     free(tree->file_offsets);
     free(tree->file_indices);
+    free(tree->direct_file_counts);
+    free(tree->direct_child_directory_counts);
+    free(tree->total_file_counts);
+    free(tree->total_directory_counts);
     memset(tree, 0, sizeof(*tree));
     tree->root_index = MFTSCAN_NO_INDEX;
 }
 
-static MftscanError mftscan_all_find_root_index(
+static MftscanError mftscan_session_find_root_index(
     const MftscanContext *context,
     const MftscanOptions *options,
     size_t *root_index) {
@@ -194,7 +225,7 @@ static MftscanError mftscan_all_find_root_index(
         wchar_t *path_text = NULL;
         MftscanError error_code = MFTSCAN_OK;
 
-        if (!mftscan_all_directory_ready(directory_node)) {
+        if (!mftscan_session_directory_ready(directory_node)) {
             continue;
         }
 
@@ -215,10 +246,10 @@ static MftscanError mftscan_all_find_root_index(
     return MFTSCAN_ERROR_INTERNAL;
 }
 
-static MftscanError mftscan_all_tree_build(
+static MftscanError mftscan_session_tree_build(
     const MftscanContext *context,
     const MftscanOptions *options,
-    MftscanAllTree *tree) {
+    MftscanSessionTree *tree) {
     size_t *child_counts = NULL;
     size_t *file_counts = NULL;
     size_t *write_offsets = NULL;
@@ -243,6 +274,10 @@ static MftscanError mftscan_all_tree_build(
     tree->parent_indices = (size_t *)calloc(tree->count, sizeof(size_t));
     tree->child_offsets = (size_t *)calloc(tree->count + 1U, sizeof(size_t));
     tree->file_offsets = (size_t *)calloc(tree->count + 1U, sizeof(size_t));
+    tree->direct_file_counts = (uint32_t *)calloc(tree->count, sizeof(uint32_t));
+    tree->direct_child_directory_counts = (uint32_t *)calloc(tree->count, sizeof(uint32_t));
+    tree->total_file_counts = (uint32_t *)calloc(tree->count, sizeof(uint32_t));
+    tree->total_directory_counts = (uint32_t *)calloc(tree->count, sizeof(uint32_t));
     child_counts = (size_t *)calloc(tree->count, sizeof(size_t));
     file_counts = (size_t *)calloc(tree->count, sizeof(size_t));
     write_offsets = (size_t *)calloc(tree->count, sizeof(size_t));
@@ -252,6 +287,10 @@ static MftscanError mftscan_all_tree_build(
         tree->parent_indices == NULL ||
         tree->child_offsets == NULL ||
         tree->file_offsets == NULL ||
+        tree->direct_file_counts == NULL ||
+        tree->direct_child_directory_counts == NULL ||
+        tree->total_file_counts == NULL ||
+        tree->total_directory_counts == NULL ||
         child_counts == NULL ||
         file_counts == NULL ||
         write_offsets == NULL ||
@@ -369,7 +408,7 @@ static MftscanError mftscan_all_tree_build(
         }
     }
 
-    error_code = mftscan_all_find_root_index(context, options, &tree->root_index);
+    error_code = mftscan_session_find_root_index(context, options, &tree->root_index);
     if (error_code != MFTSCAN_OK) {
         goto cleanup;
     }
@@ -380,17 +419,17 @@ cleanup:
     free(file_counts);
     free(child_counts);
     if (error_code != MFTSCAN_OK) {
-        mftscan_all_tree_free(tree);
+        mftscan_session_tree_free(tree);
     }
     return error_code;
 }
 
-static MftscanError mftscan_all_sort_children(
+static MftscanError mftscan_session_sort_children(
     const MftscanContext *context,
     const MftscanOptions *options,
-    MftscanAllTree *tree) {
+    MftscanSessionTree *tree) {
     size_t index = 0;
-    MftscanAllSortContext sort_context;
+    MftscanSessionSortContext sort_context;
 
     if (context == NULL || options == NULL || tree == NULL) {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
@@ -410,7 +449,7 @@ static MftscanError mftscan_all_sort_children(
                 tree->child_indices + child_start,
                 child_count,
                 sizeof(size_t),
-                mftscan_compare_all_children,
+                mftscan_session_compare_children,
                 &sort_context);
         }
         if (file_count > 1U) {
@@ -418,7 +457,7 @@ static MftscanError mftscan_all_sort_children(
                 tree->file_indices + file_start,
                 file_count,
                 sizeof(size_t),
-                mftscan_compare_all_files,
+                mftscan_session_compare_files,
                 &sort_context);
         }
     }
@@ -426,10 +465,10 @@ static MftscanError mftscan_all_sort_children(
     return MFTSCAN_OK;
 }
 
-static MftscanError mftscan_all_recompute_visible_logical_total(
+static MftscanError mftscan_session_recompute_visible_logical_total(
     const MftscanContext *context,
     const MftscanOptions *options,
-    MftscanAllTree *tree,
+    MftscanSessionTree *tree,
     size_t directory_index,
     uint8_t *visit_states) {
     size_t file_position = 0;
@@ -439,7 +478,7 @@ static MftscanError mftscan_all_recompute_visible_logical_total(
     size_t child_start = 0;
     size_t child_count = 0;
     uint64_t total_size = 0ULL;
-    MftscanAllSortContext sort_context;
+    MftscanSessionSortContext sort_context;
 
     if (context == NULL || options == NULL || tree == NULL || visit_states == NULL ||
         directory_index >= tree->count) {
@@ -462,7 +501,7 @@ static MftscanError mftscan_all_recompute_visible_logical_total(
         size_t file_index = tree->file_indices[file_position];
         const MftscanFileNode *file_node = &context->files.items[file_index];
 
-        if (!mftscan_all_file_visible(options, file_node)) {
+        if (!mftscan_session_file_visible(options, file_node)) {
             break;
         }
         if (options->has_limit && emitted_file_count >= options->limit) {
@@ -480,12 +519,12 @@ static MftscanError mftscan_all_recompute_visible_logical_total(
         const MftscanDirNode *child_node = &context->directories.items[child_index];
         MftscanError error_code = MFTSCAN_OK;
 
-        if (!mftscan_all_directory_ready(child_node)) {
+        if (!mftscan_session_directory_ready(child_node)) {
             tree->logical_totals[child_index] = 0ULL;
             continue;
         }
 
-        error_code = mftscan_all_recompute_visible_logical_total(
+        error_code = mftscan_session_recompute_visible_logical_total(
             context,
             options,
             tree,
@@ -506,7 +545,7 @@ static MftscanError mftscan_all_recompute_visible_logical_total(
             tree->child_indices + child_start,
             child_count,
             sizeof(size_t),
-            mftscan_compare_all_children,
+            mftscan_session_compare_children,
             &sort_context);
     }
 
@@ -517,7 +556,7 @@ static MftscanError mftscan_all_recompute_visible_logical_total(
         const MftscanDirNode *child_node = &context->directories.items[child_index];
         uint64_t child_size = tree->logical_totals[child_index];
 
-        if (!mftscan_all_directory_ready(child_node)) {
+        if (!mftscan_session_directory_ready(child_node)) {
             continue;
         }
         if (child_size < options->min_size) {
@@ -536,10 +575,10 @@ static MftscanError mftscan_all_recompute_visible_logical_total(
     return MFTSCAN_OK;
 }
 
-static MftscanError mftscan_all_recompute_visible_logical_totals(
+static MftscanError mftscan_session_recompute_visible_logical_totals(
     const MftscanContext *context,
     const MftscanOptions *options,
-    MftscanAllTree *tree) {
+    MftscanSessionTree *tree) {
     uint8_t *visit_states = NULL;
     MftscanError error_code = MFTSCAN_OK;
 
@@ -553,7 +592,7 @@ static MftscanError mftscan_all_recompute_visible_logical_totals(
     }
 
     memset(tree->logical_totals, 0, tree->count * sizeof(uint64_t));
-    error_code = mftscan_all_recompute_visible_logical_total(
+    error_code = mftscan_session_recompute_visible_logical_total(
         context,
         options,
         tree,
@@ -564,11 +603,11 @@ static MftscanError mftscan_all_recompute_visible_logical_totals(
     return error_code;
 }
 
-static MftscanError mftscan_all_recompute_filtered_totals(
+static MftscanError mftscan_session_recompute_filtered_totals(
     const MftscanContext *context,
     const MftscanOptions *options,
-    MftscanAllTree *tree) {
-    MftscanAllFilteredFileTotals *direct_file_totals = NULL;
+    MftscanSessionTree *tree) {
+    MftscanFilteredFileTotals *direct_file_totals = NULL;
     MftscanUint64Map charged_allocated_file_frns = { 0 };
     size_t index = 0;
     MftscanError error_code = MFTSCAN_OK;
@@ -578,10 +617,10 @@ static MftscanError mftscan_all_recompute_filtered_totals(
     }
 
     if (options->sort_mode == MFTSCAN_SORT_LOGICAL) {
-        return mftscan_all_recompute_visible_logical_totals(context, options, tree);
+        return mftscan_session_recompute_visible_logical_totals(context, options, tree);
     }
 
-    direct_file_totals = (MftscanAllFilteredFileTotals *)calloc(tree->count, sizeof(MftscanAllFilteredFileTotals));
+    direct_file_totals = (MftscanFilteredFileTotals *)calloc(tree->count, sizeof(MftscanFilteredFileTotals));
     if (direct_file_totals == NULL) {
         return MFTSCAN_ERROR_OUT_OF_MEMORY;
     }
@@ -589,31 +628,29 @@ static MftscanError mftscan_all_recompute_filtered_totals(
     memset(tree->logical_totals, 0, tree->count * sizeof(uint64_t));
     memset(tree->allocated_totals, 0, tree->count * sizeof(uint64_t));
 
-    if (options->sort_mode == MFTSCAN_SORT_ALLOCATED) {
-        for (index = 0; index < tree->count; ++index) {
-            uint64_t allocated_size = context->directories.items[index].metadata_allocated_size;
-            size_t current_index = index;
-            size_t guard_count = 0;
+    for (index = 0; index < tree->count; ++index) {
+        uint64_t allocated_size = context->directories.items[index].metadata_allocated_size;
+        size_t current_index = index;
+        size_t guard_count = 0;
 
-            if (allocated_size == 0ULL || !mftscan_all_directory_is_under_root(tree, index)) {
-                continue;
+        if (allocated_size == 0ULL || !mftscan_session_directory_is_under_root(tree, index)) {
+            continue;
+        }
+
+        tree->allocated_totals[current_index] += allocated_size;
+        while (tree->parent_indices[current_index] != MFTSCAN_NO_INDEX) {
+            size_t parent_index = tree->parent_indices[current_index];
+
+            tree->allocated_totals[parent_index] += allocated_size;
+            if (parent_index == tree->root_index) {
+                break;
             }
-
-            tree->allocated_totals[current_index] += allocated_size;
-            while (tree->parent_indices[current_index] != MFTSCAN_NO_INDEX) {
-                size_t parent_index = tree->parent_indices[current_index];
-
-                tree->allocated_totals[parent_index] += allocated_size;
-                if (parent_index == tree->root_index) {
-                    break;
-                }
-                current_index = parent_index;
-                guard_count += 1U;
-                if (guard_count > tree->count) {
-                    free(direct_file_totals);
-                    mftscan_map_free(&charged_allocated_file_frns);
-                    return MFTSCAN_ERROR_INTERNAL;
-                }
+            current_index = parent_index;
+            guard_count += 1U;
+            if (guard_count > tree->count) {
+                free(direct_file_totals);
+                mftscan_map_free(&charged_allocated_file_frns);
+                return MFTSCAN_ERROR_INTERNAL;
             }
         }
     }
@@ -622,7 +659,7 @@ static MftscanError mftscan_all_recompute_filtered_totals(
         size_t file_position = 0;
         size_t emitted_file_count = 0;
 
-        if (!mftscan_all_directory_is_under_root(tree, index)) {
+        if (!mftscan_session_directory_is_under_root(tree, index)) {
             continue;
         }
 
@@ -633,7 +670,7 @@ static MftscanError mftscan_all_recompute_filtered_totals(
             const MftscanFileNode *file_node = &context->files.items[file_index];
             size_t ignored_index = 0;
 
-            if (!mftscan_all_file_visible(options, file_node)) {
+            if (!mftscan_session_file_visible(options, file_node)) {
                 break;
             }
             if (options->has_limit && emitted_file_count >= options->limit) {
@@ -693,327 +730,431 @@ static MftscanError mftscan_all_recompute_filtered_totals(
     return MFTSCAN_OK;
 }
 
-static MftscanError mftscan_all_add_wide_string(
-    yyjson_mut_doc *document,
-    yyjson_mut_val *object,
-    const char *key,
-    const wchar_t *value) {
-    char *value_utf8 = NULL;
-
-    if (document == NULL || object == NULL || key == NULL || value == NULL) {
-        return MFTSCAN_ERROR_INVALID_ARGUMENT;
-    }
-
-    value_utf8 = mftscan_utf8_from_wide(value);
-    if (value_utf8 == NULL) {
-        return MFTSCAN_ERROR_OUT_OF_MEMORY;
-    }
-
-    if (!yyjson_mut_obj_add_strcpy(document, object, key, value_utf8)) {
-        free(value_utf8);
-        return MFTSCAN_ERROR_JSON;
-    }
-
-    free(value_utf8);
-    return MFTSCAN_OK;
-}
-
-static MftscanError mftscan_all_add_json_node(
-    yyjson_mut_doc *document,
-    yyjson_mut_val *node_object,
+static MftscanError mftscan_session_compute_counts_for_directory(
     const MftscanContext *context,
     const MftscanOptions *options,
-    const MftscanAllTree *tree,
-    size_t directory_index) {
-    yyjson_mut_val *files_array = NULL;
-    yyjson_mut_val *children_array = NULL;
+    MftscanSessionTree *tree,
+    size_t directory_index,
+    uint8_t *visit_states) {
     size_t file_position = 0;
     size_t child_position = 0;
-    size_t emitted_file_count = 0;
-    size_t emitted_count = 0;
-    MftscanError error_code = MFTSCAN_OK;
-    const MftscanDirNode *directory_node = NULL;
+    size_t direct_files = 0;
+    size_t direct_directories = 0;
+    uint32_t total_files = 0;
+    uint32_t total_directories = 0;
 
-    if (document == NULL || node_object == NULL || context == NULL || options == NULL || tree == NULL) {
+    if (context == NULL || options == NULL || tree == NULL || visit_states == NULL ||
+        directory_index >= tree->count) {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
     }
 
-    files_array = yyjson_mut_arr(document);
-    children_array = yyjson_mut_arr(document);
-    if (files_array == NULL || children_array == NULL) {
-        return MFTSCAN_ERROR_JSON;
+    if (visit_states[directory_index] == 2U) {
+        return MFTSCAN_OK;
+    }
+    if (visit_states[directory_index] == 1U) {
+        return MFTSCAN_ERROR_INTERNAL;
     }
 
-    directory_node = &context->directories.items[directory_index];
-    if (directory_index == tree->root_index) {
-        wchar_t *root_path = NULL;
-
-        error_code = mftscan_build_path(context, directory_node->frn, &root_path);
-        if (error_code != MFTSCAN_OK) {
-            return error_code;
-        }
-
-        error_code = mftscan_all_add_wide_string(document, node_object, "root_path", root_path);
-        free(root_path);
-        if (error_code != MFTSCAN_OK) {
-            return error_code;
-        }
-    } else {
-        if (directory_node->name == NULL || directory_node->name[0] == L'\0') {
-            return MFTSCAN_ERROR_INTERNAL;
-        }
-
-        error_code = mftscan_all_add_wide_string(document, node_object, "name", directory_node->name);
-        if (error_code != MFTSCAN_OK) {
-            return error_code;
-        }
-    }
-
-    if (!yyjson_mut_obj_add_uint(document, node_object, "bytes", mftscan_all_sort_value(options, tree, directory_index)) ||
-        !yyjson_mut_obj_add_val(document, node_object, "files", files_array) ||
-        !yyjson_mut_obj_add_val(document, node_object, "children", children_array)) {
-        return MFTSCAN_ERROR_JSON;
-    }
+    visit_states[directory_index] = 1U;
 
     for (file_position = tree->file_offsets[directory_index];
          file_position < tree->file_offsets[directory_index + 1U];
          ++file_position) {
         size_t file_index = tree->file_indices[file_position];
         const MftscanFileNode *file_node = &context->files.items[file_index];
-        uint64_t file_size = mftscan_all_file_sort_value(options, file_node);
-        yyjson_mut_val *file_object = NULL;
 
-        if (file_size < options->min_size) {
+        if (!mftscan_session_file_visible(options, file_node)) {
             break;
         }
-        if (options->has_limit && emitted_file_count >= options->limit) {
+        if (options->has_limit && direct_files >= options->limit) {
             break;
         }
-        if (file_node->name == NULL || file_node->name[0] == L'\0') {
-            return MFTSCAN_ERROR_INTERNAL;
-        }
 
-        file_object = yyjson_mut_arr_add_obj(document, files_array);
-        if (file_object == NULL) {
-            return MFTSCAN_ERROR_JSON;
-        }
-
-        error_code = mftscan_all_add_wide_string(document, file_object, "name", file_node->name);
-        if (error_code != MFTSCAN_OK) {
-            return error_code;
-        }
-
-        if (!yyjson_mut_obj_add_uint(document, file_object, "bytes", file_size)) {
-            return MFTSCAN_ERROR_JSON;
-        }
-
-        emitted_file_count += 1U;
+        direct_files += 1U;
     }
+
+    tree->direct_file_counts[directory_index] = mftscan_saturate_uint32(direct_files);
+    total_files = tree->direct_file_counts[directory_index];
 
     for (child_position = tree->child_offsets[directory_index];
          child_position < tree->child_offsets[directory_index + 1U];
          ++child_position) {
         size_t child_index = tree->child_indices[child_position];
         const MftscanDirNode *child_node = &context->directories.items[child_index];
-        uint64_t child_size = mftscan_all_sort_value(options, tree, child_index);
-        yyjson_mut_val *child_object = NULL;
+        uint64_t child_size = mftscan_session_sort_value(options, tree, child_index);
+        MftscanError error_code = MFTSCAN_OK;
 
-        if (!mftscan_all_directory_ready(child_node)) {
+        if (!mftscan_session_directory_ready(child_node)) {
             continue;
         }
         if (child_size < options->min_size) {
             break;
         }
-        if (options->has_limit && emitted_count >= options->limit) {
+        if (options->has_limit && direct_directories >= options->limit) {
             break;
         }
 
-        child_object = yyjson_mut_arr_add_obj(document, children_array);
-        if (child_object == NULL) {
-            return MFTSCAN_ERROR_JSON;
-        }
-
-        error_code = mftscan_all_add_json_node(document, child_object, context, options, tree, child_index);
+        error_code = mftscan_session_compute_counts_for_directory(
+            context,
+            options,
+            tree,
+            child_index,
+            visit_states);
         if (error_code != MFTSCAN_OK) {
             return error_code;
         }
 
-        emitted_count += 1U;
+        direct_directories += 1U;
+        total_files = mftscan_add_saturated_uint32(total_files, tree->total_file_counts[child_index]);
+        total_directories = mftscan_add_saturated_uint32(total_directories, 1U);
+        total_directories = mftscan_add_saturated_uint32(total_directories, tree->total_directory_counts[child_index]);
     }
 
+    tree->direct_child_directory_counts[directory_index] = mftscan_saturate_uint32(direct_directories);
+    tree->total_file_counts[directory_index] = total_files;
+    tree->total_directory_counts[directory_index] = total_directories;
+    visit_states[directory_index] = 2U;
     return MFTSCAN_OK;
 }
 
-MftscanError mftscan_cli_output_json(const MftscanOptions *options, const MftscanScanResult *scan_result) {
-    yyjson_mut_doc *document = NULL;
-    yyjson_mut_val *root_object = NULL;
-    yyjson_mut_val *items_array = NULL;
-    char *volume_utf8 = NULL;
-    char *location_utf8 = NULL;
-    char *json_text = NULL;
-    size_t json_length = 0;
-    size_t index = 0;
+static MftscanError mftscan_session_compute_counts(
+    const MftscanContext *context,
+    const MftscanOptions *options,
+    MftscanSessionTree *tree) {
+    uint8_t *visit_states = NULL;
     MftscanError error_code = MFTSCAN_OK;
 
-    if (options == NULL || scan_result == NULL) {
+    if (context == NULL || options == NULL || tree == NULL || tree->root_index >= tree->count) {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
     }
 
-    document = yyjson_mut_doc_new(NULL);
-    if (document == NULL) {
-        return MFTSCAN_ERROR_JSON;
+    visit_states = (uint8_t *)calloc(tree->count, sizeof(uint8_t));
+    if (visit_states == NULL) {
+        return MFTSCAN_ERROR_OUT_OF_MEMORY;
     }
 
-    root_object = yyjson_mut_obj(document);
-    items_array = yyjson_mut_arr(document);
-    if (root_object == NULL || items_array == NULL) {
-        error_code = MFTSCAN_ERROR_JSON;
-        goto cleanup;
-    }
+    error_code = mftscan_session_compute_counts_for_directory(
+        context,
+        options,
+        tree,
+        tree->root_index,
+        visit_states);
 
-    yyjson_mut_doc_set_root(document, root_object);
-    volume_utf8 = mftscan_utf8_from_wide(options->volume);
-    if (volume_utf8 == NULL) {
-        error_code = MFTSCAN_ERROR_OUT_OF_MEMORY;
-        goto cleanup;
-    }
-
-    location_utf8 = mftscan_utf8_from_wide((options->location != NULL) ? options->location : options->volume);
-    if (location_utf8 == NULL) {
-        error_code = MFTSCAN_ERROR_OUT_OF_MEMORY;
-        goto cleanup;
-    }
-
-    if (!yyjson_mut_obj_add_strcpy(document, root_object, "volume", volume_utf8) ||
-        !yyjson_mut_obj_add_strcpy(document, root_object, "location", location_utf8) ||
-        !yyjson_mut_obj_add_strcpy(document, root_object, "sort_by",
-            (options->sort_mode == MFTSCAN_SORT_ALLOCATED) ? "allocated" : "logical") ||
-        !yyjson_mut_obj_add_uint(document, root_object, "min_size", options->min_size) ||
-        !yyjson_mut_obj_add_uint(document, root_object, "total_leaf_dirs", (uint64_t)scan_result->count) ||
-        !yyjson_mut_obj_add_val(document, root_object, "items", items_array)) {
-        error_code = MFTSCAN_ERROR_JSON;
-        goto cleanup;
-    }
-
-    for (index = 0; index < scan_result->count; ++index) {
-        yyjson_mut_val *item_object = yyjson_mut_arr_add_obj(document, items_array);
-        char *path_utf8 = NULL;
-
-        if (item_object == NULL) {
-            error_code = MFTSCAN_ERROR_JSON;
-            goto cleanup;
-        }
-
-        path_utf8 = mftscan_utf8_from_wide(scan_result->items[index].path);
-        if (path_utf8 == NULL) {
-            error_code = MFTSCAN_ERROR_OUT_OF_MEMORY;
-            goto cleanup;
-        }
-
-        if (!yyjson_mut_obj_add_strcpy(document, item_object, "path", path_utf8) ||
-            !yyjson_mut_obj_add_uint(
-                document,
-                item_object,
-                "bytes",
-                (options->sort_mode == MFTSCAN_SORT_ALLOCATED)
-                    ? scan_result->items[index].allocated_size
-                    : scan_result->items[index].logical_size)) {
-            free(path_utf8);
-            error_code = MFTSCAN_ERROR_JSON;
-            goto cleanup;
-        }
-
-        free(path_utf8);
-    }
-
-    json_text = yyjson_mut_write(document, YYJSON_WRITE_PRETTY_TWO_SPACES, &json_length);
-    if (json_text == NULL) {
-        error_code = MFTSCAN_ERROR_JSON;
-        goto cleanup;
-    }
-
-    if (fwrite(json_text, 1, json_length, stdout) != json_length || fputc('\n', stdout) == EOF) {
-        error_code = MFTSCAN_ERROR_JSON;
-        goto cleanup;
-    }
-
-cleanup:
-    free(location_utf8);
-    free(volume_utf8);
-    free(json_text);
-    yyjson_mut_doc_free(document);
+    free(visit_states);
     return error_code;
 }
 
-MftscanError mftscan_cli_output_all_json(const MftscanOptions *options, const MftscanContext *context) {
-    yyjson_mut_doc *document = NULL;
-    yyjson_mut_val *root_object = NULL;
-    char *json_text = NULL;
-    size_t json_length = 0;
-    MftscanAllTree tree;
+static MftscanError mftscan_session_build_scan_options(
+    const MftscanSessionOptions *source_options,
+    MftscanOptions *options) {
+    wchar_t *argv[6] = { 0 };
+    wchar_t *sort_text = NULL;
+    bool show_help = false;
     MftscanError error_code = MFTSCAN_OK;
 
-    if (options == NULL || context == NULL) {
+    if (source_options == NULL || options == NULL || source_options->location == NULL ||
+        source_options->location[0] == L'\0') {
         return MFTSCAN_ERROR_INVALID_ARGUMENT;
     }
 
-    memset(&tree, 0, sizeof(tree));
-    tree.root_index = MFTSCAN_NO_INDEX;
+    sort_text = source_options->sort_mode == MFTSCAN_SORT_LOGICAL ? L"logical" : L"allocated";
+    argv[0] = L"mftscan";
+    argv[1] = L"--location";
+    argv[2] = (wchar_t *)source_options->location;
+    argv[3] = L"--sort";
+    argv[4] = sort_text;
+    argv[5] = L"--all";
 
-    error_code = mftscan_all_tree_build(context, options, &tree);
+    error_code = mftscan_parse_options(6, argv, options, &show_help);
     if (error_code != MFTSCAN_OK) {
-        goto cleanup;
+        return error_code;
     }
 
-    error_code = mftscan_all_sort_children(context, options, &tree);
+    options->min_size = source_options->min_size;
+    options->has_limit = source_options->has_limit;
+    options->limit = source_options->limit;
+    options->output_all = true;
+    options->format = MFTSCAN_FORMAT_JSON;
+    return MFTSCAN_OK;
+}
+
+static MftscanError mftscan_session_prepare_tree(MftscanSession *session) {
+    MftscanError error_code = MFTSCAN_OK;
+
+    if (session == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    error_code = mftscan_session_tree_build(&session->context, &session->options, &session->tree);
     if (error_code != MFTSCAN_OK) {
-        goto cleanup;
+        return error_code;
     }
 
-    error_code = mftscan_all_recompute_filtered_totals(context, options, &tree);
+    error_code = mftscan_session_sort_children(&session->context, &session->options, &session->tree);
     if (error_code != MFTSCAN_OK) {
-        goto cleanup;
+        return error_code;
     }
 
-    error_code = mftscan_all_sort_children(context, options, &tree);
+    error_code = mftscan_session_recompute_filtered_totals(&session->context, &session->options, &session->tree);
     if (error_code != MFTSCAN_OK) {
-        goto cleanup;
+        return error_code;
     }
 
-    document = yyjson_mut_doc_new(NULL);
-    if (document == NULL) {
-        error_code = MFTSCAN_ERROR_JSON;
-        goto cleanup;
-    }
-
-    root_object = yyjson_mut_obj(document);
-    if (root_object == NULL) {
-        error_code = MFTSCAN_ERROR_JSON;
-        goto cleanup;
-    }
-
-    yyjson_mut_doc_set_root(document, root_object);
-    error_code = mftscan_all_add_json_node(document, root_object, context, options, &tree, tree.root_index);
+    error_code = mftscan_session_sort_children(&session->context, &session->options, &session->tree);
     if (error_code != MFTSCAN_OK) {
-        goto cleanup;
+        return error_code;
     }
 
-    json_text = yyjson_mut_write(document, YYJSON_WRITE_NOFLAG, &json_length);
-    if (json_text == NULL) {
-        error_code = MFTSCAN_ERROR_JSON;
-        goto cleanup;
+    return mftscan_session_compute_counts(&session->context, &session->options, &session->tree);
+}
+
+static void mftscan_session_fill_node_info(
+    const MftscanSession *session,
+    size_t directory_index,
+    MftscanNodeInfo *node) {
+    const MftscanDirNode *directory_node = &session->context.directories.items[directory_index];
+
+    memset(node, 0, sizeof(*node));
+    node->node_id = (uint32_t)directory_index;
+    node->parent_node_id = session->tree.parent_indices[directory_index] == MFTSCAN_NO_INDEX
+        ? MFTSCAN_INVALID_NODE_ID
+        : (uint32_t)session->tree.parent_indices[directory_index];
+    node->name = directory_index == session->tree.root_index
+        ? session->options.location
+        : (directory_node->name == NULL ? L"" : directory_node->name);
+    node->path = directory_index == session->tree.root_index ? session->options.location : NULL;
+    node->logical_size = session->tree.logical_totals[directory_index];
+    node->allocated_size = session->tree.allocated_totals[directory_index];
+    node->bytes = mftscan_session_sort_value(&session->options, &session->tree, directory_index);
+    node->direct_file_count = session->tree.direct_file_counts[directory_index];
+    node->total_file_count = session->tree.total_file_counts[directory_index];
+    node->total_directory_count = session->tree.total_directory_counts[directory_index];
+    node->direct_child_directory_count = session->tree.direct_child_directory_counts[directory_index];
+    node->has_children = node->direct_file_count > 0U || node->direct_child_directory_count > 0U;
+}
+
+static void mftscan_session_fill_directory_child(
+    const MftscanSession *session,
+    size_t parent_index,
+    size_t directory_index,
+    MftscanChildInfo *child) {
+    const MftscanDirNode *directory_node = &session->context.directories.items[directory_index];
+
+    memset(child, 0, sizeof(*child));
+    child->kind = MFTSCAN_NODE_DIRECTORY;
+    child->node_id = (uint32_t)directory_index;
+    child->parent_node_id = (uint32_t)parent_index;
+    child->name = directory_node->name == NULL ? L"" : directory_node->name;
+    child->logical_size = session->tree.logical_totals[directory_index];
+    child->allocated_size = session->tree.allocated_totals[directory_index];
+    child->bytes = mftscan_session_sort_value(&session->options, &session->tree, directory_index);
+    child->direct_file_count = session->tree.direct_file_counts[directory_index];
+    child->total_file_count = session->tree.total_file_counts[directory_index];
+    child->total_directory_count = session->tree.total_directory_counts[directory_index];
+    child->direct_child_directory_count = session->tree.direct_child_directory_counts[directory_index];
+    child->has_children = child->direct_file_count > 0U || child->direct_child_directory_count > 0U;
+}
+
+static void mftscan_session_fill_file_child(
+    const MftscanSession *session,
+    size_t parent_index,
+    size_t file_index,
+    MftscanChildInfo *child) {
+    const MftscanFileNode *file_node = &session->context.files.items[file_index];
+
+    memset(child, 0, sizeof(*child));
+    child->kind = MFTSCAN_NODE_FILE;
+    child->node_id = MFTSCAN_INVALID_NODE_ID;
+    child->parent_node_id = (uint32_t)parent_index;
+    child->name = file_node->name == NULL ? L"" : file_node->name;
+    child->logical_size = file_node->logical_size;
+    child->allocated_size = file_node->allocated_size;
+    child->bytes = mftscan_session_file_sort_value(&session->options, file_node);
+    child->direct_file_count = 0U;
+    child->total_file_count = 1U;
+    child->total_directory_count = 0U;
+    child->direct_child_directory_count = 0U;
+    child->has_children = false;
+}
+
+MftscanError mftscan_session_scan(const MftscanSessionOptions *options, MftscanSession **session) {
+    MftscanSession *created_session = NULL;
+    MftscanError error_code = MFTSCAN_OK;
+
+    if (options == NULL || session == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
     }
 
-    if (fwrite(json_text, 1, json_length, stdout) != json_length || fputc('\n', stdout) == EOF) {
-        error_code = MFTSCAN_ERROR_JSON;
-        goto cleanup;
+    *session = NULL;
+    created_session = (MftscanSession *)calloc(1U, sizeof(MftscanSession));
+    if (created_session == NULL) {
+        return MFTSCAN_ERROR_OUT_OF_MEMORY;
+    }
+    created_session->tree.root_index = MFTSCAN_NO_INDEX;
+
+    error_code = mftscan_session_build_scan_options(options, &created_session->options);
+    if (error_code != MFTSCAN_OK) {
+        mftscan_session_free(created_session);
+        return error_code;
     }
 
-cleanup:
-    free(json_text);
-    if (document != NULL) {
-        yyjson_mut_doc_free(document);
+    mftscan_context_init(&created_session->context);
+    error_code = mftscan_scan_volume(&created_session->context, &created_session->options);
+    if (error_code == MFTSCAN_OK) {
+        error_code = mftscan_finalize_metadata_tree(&created_session->context);
     }
-    mftscan_all_tree_free(&tree);
-    return error_code;
+    if (error_code == MFTSCAN_OK) {
+        error_code = mftscan_session_prepare_tree(created_session);
+    }
+    if (error_code != MFTSCAN_OK) {
+        mftscan_session_free(created_session);
+        return error_code;
+    }
+
+    *session = created_session;
+    return MFTSCAN_OK;
+}
+
+void mftscan_session_free(MftscanSession *session) {
+    if (session == NULL) {
+        return;
+    }
+
+    mftscan_session_tree_free(&session->tree);
+    mftscan_context_free(&session->context);
+    mftscan_free_options(&session->options);
+    free(session);
+}
+
+MftscanError mftscan_session_get_root_node(
+    const MftscanSession *session,
+    MftscanNodeInfo *node) {
+    if (session == NULL || node == NULL || session->tree.root_index >= session->tree.count) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    mftscan_session_fill_node_info(session, session->tree.root_index, node);
+    return MFTSCAN_OK;
+}
+
+MftscanError mftscan_session_get_node(
+    const MftscanSession *session,
+    uint32_t node_id,
+    MftscanNodeInfo *node) {
+    size_t directory_index = (size_t)node_id;
+
+    if (session == NULL || node == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+    if (directory_index >= session->tree.count) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    mftscan_session_fill_node_info(session, directory_index, node);
+    return MFTSCAN_OK;
+}
+
+MftscanError mftscan_session_get_children(
+    const MftscanSession *session,
+    uint32_t node_id,
+    uint32_t start,
+    uint32_t count,
+    MftscanChildBuffer *children) {
+    size_t directory_index = (size_t)node_id;
+    uint32_t total_count = 0;
+    uint32_t remaining = 0;
+    uint32_t seen = 0;
+    uint32_t emitted = 0;
+    size_t file_position = 0;
+    size_t child_position = 0;
+
+    if (session == NULL || children == NULL) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    memset(children, 0, sizeof(*children));
+    if (directory_index >= session->tree.count) {
+        return MFTSCAN_ERROR_INVALID_ARGUMENT;
+    }
+
+    total_count = mftscan_add_saturated_uint32(
+        session->tree.direct_file_counts[directory_index],
+        session->tree.direct_child_directory_counts[directory_index]);
+    children->total_count = total_count;
+    if (count == 0U || start >= total_count) {
+        return MFTSCAN_OK;
+    }
+
+    remaining = total_count - start;
+    if (remaining > count) {
+        remaining = count;
+    }
+
+    children->items = (MftscanChildInfo *)calloc(remaining, sizeof(MftscanChildInfo));
+    if (children->items == NULL) {
+        return MFTSCAN_ERROR_OUT_OF_MEMORY;
+    }
+
+    for (file_position = session->tree.file_offsets[directory_index];
+         file_position < session->tree.file_offsets[directory_index + 1U];
+         ++file_position) {
+        size_t file_index = session->tree.file_indices[file_position];
+        const MftscanFileNode *file_node = &session->context.files.items[file_index];
+
+        if (!mftscan_session_file_visible(&session->options, file_node)) {
+            break;
+        }
+        if (session->options.has_limit && seen >= session->tree.direct_file_counts[directory_index]) {
+            break;
+        }
+
+        if (seen >= start && emitted < remaining) {
+            mftscan_session_fill_file_child(session, directory_index, file_index, &children->items[emitted++]);
+        }
+        seen += 1U;
+        if (emitted >= remaining) {
+            children->count = emitted;
+            return MFTSCAN_OK;
+        }
+    }
+
+    for (child_position = session->tree.child_offsets[directory_index];
+         child_position < session->tree.child_offsets[directory_index + 1U];
+         ++child_position) {
+        size_t child_index = session->tree.child_indices[child_position];
+        const MftscanDirNode *child_node = &session->context.directories.items[child_index];
+        uint64_t child_size = mftscan_session_sort_value(&session->options, &session->tree, child_index);
+        uint32_t seen_directories = seen - session->tree.direct_file_counts[directory_index];
+
+        if (!mftscan_session_directory_ready(child_node)) {
+            continue;
+        }
+        if (child_size < session->options.min_size) {
+            break;
+        }
+        if (session->options.has_limit &&
+            seen_directories >= session->tree.direct_child_directory_counts[directory_index]) {
+            break;
+        }
+
+        if (seen >= start && emitted < remaining) {
+            mftscan_session_fill_directory_child(session, directory_index, child_index, &children->items[emitted++]);
+        }
+        seen += 1U;
+        if (emitted >= remaining) {
+            break;
+        }
+    }
+
+    children->count = emitted;
+    return MFTSCAN_OK;
+}
+
+void mftscan_child_buffer_free(MftscanChildBuffer *children) {
+    if (children == NULL) {
+        return;
+    }
+
+    free(children->items);
+    memset(children, 0, sizeof(*children));
 }

@@ -9,42 +9,51 @@
       <UniqueIdentifier>{A7CA753F-D095-43F4-96B3-756BA03E1EAA}</UniqueIdentifier>
       <Extensions>h;hpp;hxx;hm;inl;inc;ipp;xsd</Extensions>
     </Filter>
-    <Filter Include="Third Party">
-      <UniqueIdentifier>{95E8FFBA-6F54-48D8-B3E4-883B9A9A8717}</UniqueIdentifier>
-    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\mftscan.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\cli_output.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="src\model.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="third_party\yyjson\yyjson.h">
-      <Filter>Third Party</Filter>
+    <ClInclude Include="src\session.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\main.c">
+    <ClCompile Include="src\admin.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\output_json.c">
+    <ClCompile Include="src\aggregate.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\output_table.c">
+    <ClCompile Include="src\ntfs_mft.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="third_party\yyjson\yyjson.c">
-      <Filter>Third Party</Filter>
+    <ClCompile Include="src\ntfs_record.c">
+      <Filter>Source Files</Filter>
     </ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <Manifest Include="app.manifest" />
-    <None Include="third_party\yyjson\LICENSE">
-      <Filter>Third Party</Filter>
-    </None>
+    <ClCompile Include="src\ntfs_stream.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ntfs_volume.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\path_resolver.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\platform_scan.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\scan.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\session.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\util.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

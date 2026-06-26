@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <wchar.h>
 
-#include "model.h"
+#include "cli_output.h"
 
 static void mftscan_print_error(MftscanError error_code) {
     const char *detail_text = mftscan_error_detail();
@@ -49,10 +49,10 @@ int wmain(int argc, wchar_t **argv) {
     }
     if (error_code == MFTSCAN_OK) {
         error_code = options.output_all
-            ? mftscan_output_all_json(&options, &context)
+            ? mftscan_cli_output_all_json(&options, &context)
             : (options.format == MFTSCAN_FORMAT_JSON)
-            ? mftscan_output_json(&options, &scan_result)
-            : mftscan_output_table(&options, &scan_result);
+            ? mftscan_cli_output_json(&options, &scan_result)
+            : mftscan_cli_output_table(&options, &scan_result);
     }
 
     if (error_code != MFTSCAN_OK) {
